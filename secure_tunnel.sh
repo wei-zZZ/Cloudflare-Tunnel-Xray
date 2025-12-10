@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
 # Cloudflare Tunnel + Xray 安装脚本 (Root版)
-# 版本: 4.2 - 修复隧道检查bug
+# 版本: 4.3 - 修复配置文件解析错误
 # ============================================
 
 set -e
@@ -44,7 +44,7 @@ collect_user_info() {
     echo ""
     echo "╔══════════════════════════════════════════════╗"
     echo "║    Cloudflare Tunnel 安装脚本                ║"
-    echo "║                版本 4.2                      ║"
+    echo "║                版本 4.3                      ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
     
@@ -95,7 +95,7 @@ check_system() {
     fi
     
     # 检查必要工具
-    local required_tools=("curl" "unzip" "wget" "jq")
+    local required_tools=("curl" "unzip" "wget")
     for tool in "${required_tools[@]}"; do
         if ! command -v "$tool" &> /dev/null; then
             print_info "安装 $tool..."
@@ -301,7 +301,7 @@ setup_tunnel() {
     print_info "绑定域名: $USER_DOMAIN"
     "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN"
     
-    # 保存隧道配置
+    # 保存隧道配置（使用安全的方式）
     mkdir -p "$CONFIG_DIR"
     cat > "$CONFIG_DIR/tunnel.conf" << EOF
 # Cloudflare Tunnel 配置
@@ -309,7 +309,7 @@ TUNNEL_ID=$tunnel_id
 TUNNEL_NAME=$TUNNEL_NAME
 DOMAIN=$USER_DOMAIN
 CERT_PATH=/root/.cloudflared/cert.pem
-CREATED_TIME=$(date +"%Y-%m-%d %H:%M:%S")
+CREATED_DATE=$(date +"%Y-%m-%d")
 EOF
     
     # 如果找到了JSON文件，记录路径
@@ -322,17 +322,42 @@ EOF
 }
 
 # ----------------------------
+# 安全读取配置文件
+# ----------------------------
+read_config() {
+    local config_file="$CONFIG_DIR/tunnel.conf"
+    
+    if [[ ! -f "$config_file" ]]; then
+        print_error "配置文件不存在: $config_file"
+        exit 1
+    fi
+    
+    # 使用while循环读取，避免source命令解析问题
+    while IFS='=' read -r key value; do
+        # 跳过注释行和空行
+        [[ "$key" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$key" ]] && continue
+        
+        # 去除空格
+        key=$(echo "$key" | xargs)
+        value=$(echo "$value" | xargs)
+        
+        # 设置变量
+        declare -g "$key"="$value"
+    done < "$config_file"
+}
+
+# ----------------------------
 # 配置 Xray
 # ----------------------------
 configure_xray() {
     print_info "配置 Xray..."
     
-    # 读取隧道ID
-    local tunnel_id
-    if [[ -f "$CONFIG_DIR/tunnel.conf" ]]; then
-        source "$CONFIG_DIR/tunnel.conf"
-    else
-        print_error "未找到隧道配置文件"
+    # 安全读取配置文件
+    read_config
+    
+    if [[ -z "$TUNNEL_ID" ]]; then
+        print_error "无法读取隧道ID"
         exit 1
     fi
     
@@ -341,7 +366,9 @@ configure_xray() {
     uuid=$(cat /proc/sys/kernel/random/uuid)
     local port=10000  # 固定端口，便于管理
     
-    # 追加到配置文件
+    # 追加到配置文件（使用安全的方式）
+    echo "" >> "$CONFIG_DIR/tunnel.conf"
+    echo "# Xray 配置" >> "$CONFIG_DIR/tunnel.conf"
     echo "UUID=$uuid" >> "$CONFIG_DIR/tunnel.conf"
     echo "PORT=$port" >> "$CONFIG_DIR/tunnel.conf"
     
@@ -384,18 +411,28 @@ EOF
     
     # 创建隧道配置文件
     # 使用正确的JSON文件路径
-    local json_path="/root/.cloudflared/${tunnel_id}.json"
+    local json_path="/root/.cloudflared/${TUNNEL_ID}.json"
     if [[ ! -f "$json_path" ]]; then
         json_path="/root/.cloudflared/${TUNNEL_NAME}.json"
+        if [[ ! -f "$json_path" ]]; then
+            # 最后尝试查找任意JSON文件
+            json_path=$(find /root/.cloudflared -name "*.json" -type f | head -1)
+        fi
+    fi
+    
+    if [[ ! -f "$json_path" ]]; then
+        print_error "找不到隧道凭证JSON文件"
+        print_info "请在 /root/.cloudflared/ 目录下查找JSON文件"
+        exit 1
     fi
     
     cat > "$CONFIG_DIR/config.yaml" << EOF
-tunnel: $tunnel_id
+tunnel: $TUNNEL_ID
 credentials-file: $json_path
 originCert: /root/.cloudflared/cert.pem
 
 ingress:
-  - hostname: $USER_DOMAIN
+  - hostname: $DOMAIN
     service: http://localhost:$port
     originRequest:
       noTLSVerify: true
@@ -405,7 +442,7 @@ ingress:
       noHappyEyeballs: false
       keepAliveConnections: 100
       keepAliveTimeout: 90s
-      httpHostHeader: $USER_DOMAIN
+      httpHostHeader: $DOMAIN
   - service: http_status:404
 EOF
     
@@ -515,39 +552,46 @@ show_connection_info() {
     print_info "═══════════════════════════════════════════════"
     echo ""
     
-    # 读取配置
+    # 安全读取配置
     if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
         print_error "未找到配置文件"
         return
     fi
     
-    source "$CONFIG_DIR/tunnel.conf" 2>/dev/null
+    # 直接读取关键变量
+    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     
-    print_success "🔗 域名: $DOMAIN"
-    print_success "🔑 UUID: $UUID"
+    if [[ -z "$domain" ]] || [[ -z "$uuid" ]]; then
+        print_error "无法读取配置信息"
+        return
+    fi
+    
+    print_success "🔗 域名: $domain"
+    print_success "🔑 UUID: $uuid"
     print_success "🚪 端口: 443 (TLS) / 80 (非TLS)"
-    print_success "🛣️  路径: /$UUID"
+    print_success "🛣️  路径: /$uuid"
     echo ""
     
     print_info "📋 VLESS 连接配置:"
     echo ""
-    echo "vless://${UUID}@${DOMAIN}:443?encryption=none&security=tls&type=ws&host=${DOMAIN}&path=/${UUID}#安全隧道"
+    echo "vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=/${uuid}#安全隧道"
     echo ""
     
     print_info "⚙️  Clash 配置:"
     echo ""
     echo "- name: 安全隧道"
     echo "  type: vless"
-    echo "  server: ${DOMAIN}"
+    echo "  server: ${domain}"
     echo "  port: 443"
-    echo "  uuid: ${UUID}"
+    echo "  uuid: ${uuid}"
     echo "  network: ws"
     echo "  tls: true"
     echo "  udp: true"
     echo "  ws-opts:"
-    echo "    path: /${UUID}"
+    echo "    path: /${uuid}"
     echo "    headers:"
-    echo "      Host: ${DOMAIN}"
+    echo "      Host: ${domain}"
     echo ""
     
     print_info "🔧 服务管理命令:"
@@ -567,7 +611,7 @@ show_connection_info() {
     
     print_warning "⚠️ 重要提示:"
     print_warning "1. 请等待几分钟让DNS生效"
-    print_warning "2. 在Cloudflare DNS中确认 $DOMAIN 已正确解析"
+    print_warning "2. 在Cloudflare DNS中确认 $domain 已正确解析"
     print_warning "3. 首次连接可能需要等待证书签发"
     print_warning "4. 检查防火墙是否开放端口"
 }
@@ -593,13 +637,13 @@ show_status() {
     fi
     
     echo ""
-    print_info "JSON文件状态:"
-    if [[ -f "/root/.cloudflared/${TUNNEL_NAME}.json" ]]; then
-        print_success "✅ 找到隧道JSON文件: /root/.cloudflared/${TUNNEL_NAME}.json"
-    elif [[ -f "/root/.cloudflared/*.json" ]]; then
-        print_info "找到JSON文件: $(ls /root/.cloudflared/*.json 2>/dev/null | head -1)"
+    print_info "配置文件状态:"
+    if [[ -f "$CONFIG_DIR/tunnel.conf" ]]; then
+        print_success "✅ 配置文件存在"
+        echo "配置摘要:"
+        grep -E "^(TUNNEL_ID|DOMAIN|UUID)=" "$CONFIG_DIR/tunnel.conf"
     else
-        print_error "❌ 未找到隧道JSON文件"
+        print_error "❌ 配置文件不存在"
     fi
 }
 
@@ -635,7 +679,7 @@ main() {
     echo ""
     echo "╔══════════════════════════════════════════════╗"
     echo "║    Cloudflare Tunnel 一键安装脚本            ║"
-    echo "║                版本4.2 (修复版)              ║"
+    echo "║                版本4.3 (修复解析错误)        ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
     
@@ -672,17 +716,6 @@ main() {
             print_info "重新授权..."
             direct_cloudflare_auth
             ;;
-        "fix-json")
-            print_info "修复JSON文件..."
-            if [[ -f "$CONFIG_DIR/tunnel.conf" ]]; then
-                source "$CONFIG_DIR/tunnel.conf"
-                if [[ -n "$TUNNEL_ID" ]]; then
-                    echo "隧道ID: $TUNNEL_ID"
-                    # 查找JSON文件
-                    find /root/.cloudflared -name "*.json" -exec ls -la {} \;
-                fi
-            fi
-            ;;
         *)
             echo "使用方法:"
             echo "  sudo $0 install      # 安装"
@@ -690,7 +723,6 @@ main() {
             echo "  sudo $0 restart      # 重启服务"
             echo "  sudo $0 config       # 查看配置"
             echo "  sudo $0 auth         # 重新授权"
-            echo "  sudo $0 fix-json     # 修复JSON文件"
             echo "  sudo $0 uninstall    # 卸载"
             exit 1
             ;;
