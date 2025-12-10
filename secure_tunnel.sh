@@ -131,13 +131,19 @@ check_system() {
 setup_user_and_dirs() {
     print_info "设置用户和目录..."
     
-    # 创建系统用户
+    # 创建系统用户（指定主目录）
     if ! id -u "$SERVICE_USER" &> /dev/null; then
-        useradd -r -s /usr/sbin/nologin "$SERVICE_USER"
+        useradd -r -m -s /usr/sbin/nologin -d "/home/$SERVICE_USER" "$SERVICE_USER"
         print_success "创建用户: $SERVICE_USER"
+    else
+        # 如果用户已存在但没主目录，则创建
+        if [ ! -d "/home/$SERVICE_USER" ]; then
+            mkdir -p "/home/$SERVICE_USER"
+            chown -R "$SERVICE_USER:$SERVICE_GROUP" "/home/$SERVICE_USER"
+        fi
     fi
     
-    # 创建目录
+    # 创建其他目录
     local dirs=("$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR")
     for dir in "${dirs[@]}"; do
         mkdir -p "$dir"
