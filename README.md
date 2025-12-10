@@ -43,7 +43,7 @@ IPv4/IPv6 双栈 支持双协议栈测试和连接
 
 下载最新版本脚本
 ```bash
-curl -L -o secure_tunnel.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/secure_tunnel.sh
+wget -L -o secure_tunnel.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/secure_tunnel.sh
 ```
  添加执行权限
 ```bash
@@ -52,11 +52,14 @@ chmod +x secure_tunnel.sh
 
 2. 完整安装
 
-```bash
+
 # 一键安装（包含域名优选）
+```bash
 sudo ./secure_tunnel.sh install
+```
 
 # 或使用自定义参数
+```bash
 sudo PROTOCOL="vless" ARGO_IP_VERSION="6" ./secure_tunnel.sh install
 ```
 
