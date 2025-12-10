@@ -1,397 +1,247 @@
 🔐 Secure Tunnel Manager - 安全隧道管理工具
 
-📖 概述
 
-Secure Tunnel Manager 是一个集成了 Cloudflare Tunnel 和 Xray 的安全代理解决方案，支持自动优选 Cloudflare 节点域名，提供稳定、快速、安全的网络隧道服务。
+项目简介
+这是一个自动化部署 Cloudflare Tunnel 与 Xray-core 的 Bash 脚本，能够快速搭建一个基于 Cloudflare Argo Tunnel 的安全代理隧道。该脚本实现了免端口暴露、自动 SSL 证书签发和 WebSocket 代理功能。
 
-✨ 核心特性
+功能特性
+✅ 一键安装 - 全自动部署 Xray-core 和 Cloudflare Tunnel
 
-特性 说明
-智能域名优选 自动测试并选择延迟最低的 Cloudflare 节点
-双重代理架构 Cloudflare Tunnel + Xray 双安全层
-企业级安全 专用系统用户、文件哈希校验、最小权限原则
-系统集成 完整的 systemd 服务管理
-配置与数据分离 符合 Linux 标准的目录结构
-缓存机制 优化结果缓存，避免重复测试
-IPv4/IPv6 双栈 支持双协议栈测试和连接
+✅ 智能配置 - 自动生成 VLESS + WebSocket + TLS 配置
 
-📁 文件结构
+✅ 系统服务 - 自动创建 systemd 服务并配置开机自启
 
-```
-/etc/secure_tunnel/              # 配置文件目录
-├── xray.json                   # Xray 主配置文件
-├── client-info.txt            # 客户端连接信息
-└── optimized_domains.conf     # 优选域名配置
+✅ 多架构支持 - 支持 x86_64 和 arm64 架构
 
-/var/lib/secure_tunnel/         # 数据目录
-├── cache/                     # 优选域名缓存
-└── xray.zip                   # 临时文件
+✅ 配置管理 - 提供状态检查、重启、重新授权等管理功能
 
-/var/log/secure_tunnel/        # 日志目录
-├── xray-access.log
-├── xray-error.log
-└── argo.log
+系统要求
+操作系统: Ubuntu/Debian/CentOS 等主流 Linux 发行版
 
-/usr/local/bin/                # 二进制文件
-├── xray
-└── cloudflared
-```
+权限: Root 用户权限
+
+网络: 可正常访问 GitHub 和 Cloudflare
+
+Cloudflare 账户: 需要拥有一个域名并托管在 Cloudflare
 
 🚀 快速开始
 
-1. 下载脚本
-一键安装（包含域名优选）
+1.下载脚本
+2.一键安装
 ```bash
 bash -c "$(wget -qO- https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/secure_tunnel.sh)" -- install
 ```
+3. 按照提示操作
+脚本将引导您完成以下步骤：
 
-# 或使用自定义参数
-```bash
-sudo PROTOCOL="vless" ARGO_IP_VERSION="6" ./secure_tunnel.sh install
-```
+输入您的域名（如 tunnel.yourdomain.com）
 
-3. 手动配置 Argo Tunnel
-4. 
-# 1. 登录 Cloudflare（会打开浏览器）
-```bash
-sudo -u secure_tunnel cloudflared tunnel login
-```
-# 2. 创建隧道
-```bash
-sudo -u secure_tunnel cloudflared tunnel create secure_tunnel
-```
-# 3. 绑定域名
-```bash
-sudo -u secure_tunnel cloudflared tunnel route dns secure_tunnel your-domain.com
-```
-# 4. 获取隧道 Token 并保存
-```bash
-sudo -u secure_tunnel cloudflared tunnel token secure_tunnel | sudo tee /etc/secure_tunnel/argo-token.txt
-```
+设置隧道名称（默认：secure-tunnel）
 
-🎯 使用场景
+授权 Cloudflare 账户
 
-场景一：个人科学上网
+自动完成部署
 
-```bash
-# 快速部署个人代理
+详细使用方法
+安装命令
+bash
+# 完整安装
 sudo ./secure_tunnel.sh install
 
-# 连接信息保存在：
-cat /etc/secure_tunnel/client-info.txt
-
-# 在客户端（如 v2rayN）导入 VLESS 链接即可使用
-```
-
-场景二：团队远程访问
-
-```bash
-# 部署企业级隧道
-sudo TUNNEL_NAME="team-tunnel" ./secure_tunnel.sh install
-
-# 团队成员使用相同的隧道配置
-# 管理员可在 Cloudflare Zero Trust 控制台管理访问权限
-```
-
-场景三：网站反向代理
-
-```bash
-# 将本地服务暴露到公网
-# 修改 xray.json 配置，将流量转发到本地 Web 服务
-```
-
-⚙️ 配置说明
-
-环境变量配置
-
-变量名 默认值 说明
-PROTOCOL vless 代理协议：vless 或 vmess
-ARGO_IP_VERSION 4 Argo 隧道 IP 版本：4 或 6
-TUNNEL_NAME secure_tunnel_$(hostname) 隧道名称
-CF_TEST_COUNT 3 域名测试次数
-CF_TIMEOUT 2 测试超时时间（秒）
-
-配置文件说明
-
-1. Xray 配置文件 (/etc/secure_tunnel/xray.json)
-
-```json
-{
-    "inbounds": [{
-        "port": 随机端口,
-        "protocol": "vless/vmess",
-        "settings": {
-            "clients": [{
-                "id": "自动生成的UUID"
-            }]
-        }
-    }]
-}
-```
-
-2. 优选域名配置 (/etc/secure_tunnel/optimized_domains.conf)
-
-```ini
-# 自动生成的优选域名配置
-DOMAIN_IPV4="icook.hk"      # IPv4 最佳域名
-DOMAIN_IPV6="cf.xiu2.xyz"   # IPv6 最佳域名
-```
-
-📊 域名优选功能
-
-测试域名列表
-
-脚本默认测试以下 Cloudflare 节点（按延迟排序）：
-
-1. icook.hk - 香港节点
-2. cloudflare.cfgo.cc - 国内优化节点
-3. cloudflare.speedcdn.cc - 速度优化节点
-4. cdn.shanggan.ltd - 上海节点
-5. cdn.bestg.win - 广州节点
-6. cf.xiu2.xyz - 备用节点
-7. cloudflare.ipq.co - 国际节点
-8. cfip.icu - 智能路由节点
-9. cdn.cofia.xyz - 企业级节点
-10. speed.cloudflare.com - 官方测试节点
-
-优选算法
-
-1. 并行测试：同时测试所有域名延迟
-2. 多次采样：每个域名测试 3 次取平均值
-3. 智能排序：选择平均延迟最低的域名
-4. 缓存机制：优选结果缓存 1 小时
-
-手动管理优选域名
-
-```bash
-# 1. 手动测试域名延迟
-sudo ./secure_tunnel.sh optimize test
-
-# 2. 仅运行优选（不显示详细结果）
-sudo ./secure_tunnel.sh optimize auto
-
-# 3. 清理优选缓存
-sudo ./secure_tunnel.sh optimize clean
-
-# 4. 查看域名列表
-sudo ./secure_tunnel.sh optimize list
-```
-
-🔧 维护与管理
-
-查看服务状态
-
-```bash
-# 查看完整状态
+# 查看服务状态
 sudo ./secure_tunnel.sh status
 
-# 查看 Xray 服务日志
-sudo journalctl -u secure-tunnel-xray -f
+# 重启服务
+sudo ./secure_tunnel.sh restart
 
-# 查看 Argo 隧道日志
-sudo journalctl -u secure-tunnel-argo -f
-```
+# 查看配置信息
+sudo ./secure_tunnel.sh config
 
-更新配置
+# 重新授权 Cloudflare
+sudo ./secure_tunnel.sh auth
 
-```bash
-# 重新优选域名
-sudo rm -f /var/lib/secure_tunnel/cache/*.cache
-sudo ./secure_tunnel.sh optimize auto
-
-# 重新生成客户端配置
-sudo ./secure_tunnel.sh install --reconfigure-only
-```
-
-卸载服务
-
-```bash
-# 完全卸载（保留配置）
-sudo ./secure_tunnel.sh uninstall --keep-config
-
-# 完全卸载（清除所有）
+# 完全卸载
 sudo ./secure_tunnel.sh uninstall
-```
+安装后配置
+1. 客户端配置
+安装完成后，脚本会显示以下连接信息：
 
-🛡️ 安全最佳实践
+VLESS 链接: 可直接导入支持 VLESS 协议的客户端
 
-1. 定期更新
+Clash 配置: 适用于 Clash 客户端的 YAML 配置
 
-```bash
-# 更新二进制文件哈希值
-# 从官方发布页面获取最新哈希：
-# - Xray: https://github.com/XTLS/Xray-core/releases
-# - cloudflared: https://github.com/cloudflare/cloudflared/releases
-```
+手动配置参数:
 
-2. 防火墙配置
+地址: 您的域名
 
-```bash
-# 配置 UFW 防火墙
-sudo ufw allow 22/tcp
-sudo ufw allow 443/tcp
-sudo ufw allow 80/tcp
-sudo ufw enable
-```
+端口: 443 (TLS) 或 80 (非TLS)
 
-3. 监控告警
+UUID: 自动生成的唯一标识符
 
-```bash
-# 监控服务状态
-sudo systemctl status secure-tunnel-*
+传输协议: WebSocket
 
-# 查看实时日志
-sudo tail -f /var/log/secure_tunnel/xray-error.log
+路径: /生成的UUID
 
-# 设置日志轮转
-sudo cp logrotate.conf /etc/logrotate.d/secure_tunnel
-```
+TLS: 启用
 
-4. 定期备份
+2. Cloudflare 配置检查
+登录 Cloudflare 控制台
 
-```bash
-# 备份关键配置
-BACKUP_DIR="/backup/secure_tunnel-$(date +%Y%m%d)"
-mkdir -p "$BACKUP_DIR"
-cp -r /etc/secure_tunnel "$BACKUP_DIR/"
-cp -r /var/lib/secure_tunnel "$BACKUP_DIR/"
+进入您的域名
 
-# 创建恢复脚本
-cat > "$BACKUP_DIR/restore.sh" << EOF
-#!/bin/bash
-cp -r etc/secure_tunnel /etc/
-cp -r var/lib/secure_tunnel /var/lib/
-systemctl daemon-reload
-systemctl restart secure-tunnel-xray
-EOF
-```
+检查 DNS 记录是否已自动添加
 
-🔍 故障排查
+确认 SSL/TLS 设置为 "完全" 或 "灵活"
 
+文件结构
+text
+/root/.cloudflared/
+├── cert.pem              # Cloudflare 证书
+└── *.json               # 隧道凭证文件
+
+/etc/secure_tunnel/
+├── tunnel.conf          # 隧道配置文件
+├── xray.json           # Xray 配置文件
+└── config.yaml         # Cloudflare Tunnel 配置
+
+/var/log/secure_tunnel/
+├── xray.log
+├── xray-error.log
+├── argo.log
+└── argo-error.log
+
+/usr/local/bin/
+├── xray                # Xray 核心程序
+└── cloudflared         # Cloudflare Tunnel 客户端
+服务管理
+启动/停止服务
+bash
+# 启动所有服务
+systemctl start secure-tunnel-xray.service secure-tunnel-argo.service
+
+# 停止所有服务
+systemctl stop secure-tunnel-xray.service secure-tunnel-argo.service
+
+# 查看服务状态
+systemctl status secure-tunnel-xray.service secure-tunnel-argo.service
+
+# 启用开机自启
+systemctl enable secure-tunnel-xray.service secure-tunnel-argo.service
+日志查看
+bash
+# 查看 Xray 日志
+journalctl -u secure-tunnel-xray.service -f
+
+# 查看 Argo Tunnel 日志
+journalctl -u secure-tunnel-argo.service -f
+
+# 查看错误日志
+tail -f /var/log/secure_tunnel/*error.log
+故障排除
 常见问题
+授权失败
 
-1. 安装失败
+确保使用正确的 Cloudflare 账户
 
-```bash
-# 检查系统依赖
-./secure_tunnel.sh --check-deps
+检查域名是否在 Cloudflare 托管
 
-# 查看详细错误日志
-sudo journalctl -xe | tail -50
-```
+尝试重新授权：sudo ./secure_tunnel.sh auth
 
-2. 连接失败
+服务启动失败
 
-```bash
-# 测试域名连通性
-curl -v https://优选域名/cdn-cgi/trace
+检查日志：journalctl -u secure-tunnel-argo.service -n 50
 
-# 检查端口监听
-sudo netstat -tlnp | grep xray
-```
+确认证书是否存在：ls -la /root/.cloudflared/cert.pem
 
-3. 优选域名失效
+检查配置文件：sudo ./secure_tunnel.sh config
 
-```bash
-# 手动指定域名
-echo 'DOMAIN_IPV4="speed.cloudflare.com"' > /etc/secure_tunnel/optimized_domains.conf
-sudo systemctl restart secure-tunnel-xray
-```
+无法连接
 
-调试模式
+等待 DNS 传播（可能需要几分钟）
 
-```bash
-# 启用调试输出
-DEBUG=1 ./secure_tunnel.sh install
+检查 Cloudflare DNS 设置
 
-# 查看详细日志
-sudo journalctl -u secure-tunnel-xray -f -o cat
-```
+验证客户端配置参数
 
-📈 性能优化
+证书问题
 
-调整测试参数
+重新生成证书：删除 /root/.cloudflared/cert.pem 后重新授权
 
-```bash
-# 在脚本开头修改以下参数：
-CF_TEST_COUNT=2      # 减少测试次数（更快）
-CF_TIMEOUT=1         # 缩短超时时间（更严格）
-CACHE_EXPIRE=7200    # 延长缓存时间（2小时）
-```
+检查证书有效期
 
-添加自定义域名
+诊断命令
+bash
+# 显示完整状态
+sudo ./secure_tunnel.sh status
 
-```bash
-# 编辑脚本中的 CF_TEST_DOMAINS 数组
-CF_TEST_DOMAINS=(
-    "your-custom-domain.com"
-    "icook.hk"
-    # ... 其他域名
-)
-```
+# 检查隧道状态
+cloudflared tunnel list
 
-多区域优选
+# 检查进程运行状态
+ps aux | grep -E "(xray|cloudflared)"
 
-```bash
-# 针对不同地区使用不同域名列表
-if [[ "$(curl -s ipinfo.io/country)" == "CN" ]]; then
-    CF_TEST_DOMAINS=("国内优化域名列表")
-else
-    CF_TEST_DOMAINS=("国际域名列表")
-fi
-```
+# 测试本地端口
+curl -I http://localhost:10000
+更新与维护
+手动更新组件
+bash
+# 更新 Xray
+wget -O /tmp/xray.zip "最新版本下载链接"
+unzip -o /tmp/xray.zip -d /tmp
+mv /tmp/xray /usr/local/bin/
+systemctl restart secure-tunnel-xray.service
 
-🤝 贡献指南
+# 更新 cloudflared
+wget -O /usr/local/bin/cloudflared "最新版本下载链接"
+chmod +x /usr/local/bin/cloudflared
+systemctl restart secure-tunnel-argo.service
+备份配置
+bash
+# 备份重要文件
+cp -r /etc/secure_tunnel ~/secure_tunnel_backup
+cp -r /root/.cloudflared ~/cloudflared_backup
+安全建议
+定期更新
 
-报告问题
+定期检查并更新 Xray 和 cloudflared 版本
 
-1. 查看现有 Issues
-2. 创建新 Issue，包含：
-   · 操作系统版本
-   · 脚本版本
-   · 错误日志
-   · 复现步骤
+关注安全公告
 
-提交改进
+监控访问
 
-1. Fork 仓库
-2. 创建功能分支
-3. 提交更改
-4. 创建 Pull Request
+定期检查服务日志
 
-📄 许可证
+监控异常连接
 
-MIT License - 详见 LICENSE 文件
+备份配置
 
-🆘 技术支持
+备份 /etc/secure_tunnel 目录
 
-官方文档
+备份 /root/.cloudflared/cert.pem 文件
 
-· Cloudflare Tunnel 文档
-· Xray-core 文档
+访问控制
 
-社区支持
+使用强密码保护服务器
 
-· GitHub Issues: 问题反馈
-· Telegram 群组: 实时交流
-· Discord 频道: 技术讨论
+配置防火墙规则
 
-紧急恢复
+免责声明
+本项目仅为技术研究和学习用途，请遵守当地法律法规。使用者应对自己的行为负责，作者不对任何因使用本项目造成的直接或间接损失承担责任。
 
-```bash
-# 如果服务完全损坏
-cd /tmp
-curl -O https://raw.githubusercontent.com/your-repo/secure-tunnel/main/secure_tunnel.sh
-chmod +x secure_tunnel.sh
-sudo ./secure_tunnel.sh uninstall
-sudo ./secure_tunnel.sh install
-```
+技术支持
+如有问题，请：
 
----
+查看本文档的故障排除部分
 
-最后更新: 2024年12月
-版本: v2.1
-作者: Q
-兼容性: Ubuntu 20.04+, Debian 10+, CentOS 8+
+检查日志文件
 
-💡 提示：生产环境部署前，请在测试环境充分验证配置。
+确保按照步骤正确操作
+
+版本历史
+v4.3 - 修复配置文件解析错误
+
+v4.0 - 支持无浏览器授权模式
+
+v3.0 - 增加多架构支持和系统服务管理
+
+注意: 请确保您有合法的使用场景，并遵守相关服务条款和法律法规。
