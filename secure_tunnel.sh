@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
 # Cloudflare Tunnel + Xray 安装脚本 (Root版)
-# 版本: 4.1 - 直接服务器授权版
+# 版本: 4.2 - 修复隧道检查bug
 # ============================================
 
 set -e
@@ -44,7 +44,7 @@ collect_user_info() {
     echo ""
     echo "╔══════════════════════════════════════════════╗"
     echo "║    Cloudflare Tunnel 安装脚本                ║"
-    echo "║                版本 4.1                      ║"
+    echo "║                版本 4.2                      ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
     
@@ -95,7 +95,7 @@ check_system() {
     fi
     
     # 检查必要工具
-    local required_tools=("curl" "unzip" "wget")
+    local required_tools=("curl" "unzip" "wget" "jq")
     for tool in "${required_tools[@]}"; do
         if ! command -v "$tool" &> /dev/null; then
             print_info "安装 $tool..."
@@ -176,55 +176,7 @@ direct_cloudflare_auth() {
     echo ""
     
     # 运行 cloudflared tunnel login，它会自动生成链接
-    # 我们需要捕获输出并显示链接
-    local temp_output=$(mktemp)
-    
-    # 启动 cloudflared login（非阻塞方式）
-    "$BIN_DIR/cloudflared" tunnel login 2>&1 | tee "$temp_output" &
-    local cloudflared_pid=$!
-    
-    # 等待几秒让链接显示
-    sleep 5
-    
-    # 从输出中提取链接
-    local auth_url=""
-    
-    # 尝试多种方式提取链接
-    while IFS= read -r line; do
-        if [[ "$line" =~ https://[^\ ]* ]]; then
-            auth_url="${BASH_REMATCH[0]}"
-            break
-        elif [[ "$line" =~ ^(http|https):// ]]; then
-            auth_url="$line"
-            break
-        fi
-    done < "$temp_output"
-    
-    if [[ -n "$auth_url" ]]; then
-        print_success "✅ 获取到授权链接！"
-        echo ""
-        echo "    🔗 请复制以下链接到浏览器打开："
-        echo ""
-        echo "        $auth_url"
-        echo ""
-        print_info "授权步骤："
-        print_info "1. 用浏览器打开上面的链接"
-        print_info "2. 登录您的 Cloudflare 账户"
-        print_info "3. 选择要授权的域名"
-        print_info "4. 点击 '授权' 按钮"
-        print_info "5. 授权成功后，返回终端按回车继续"
-        echo ""
-    else
-        print_warning "⚠️  无法自动提取链接，请查看下面的输出..."
-        echo ""
-        cat "$temp_output"
-        echo ""
-        print_info "请在输出中寻找类似 https://... 的链接"
-        print_info "复制该链接到浏览器打开并授权"
-    fi
-    
-    # 清理临时文件
-    rm -f "$temp_output"
+    "$BIN_DIR/cloudflared" tunnel login
     
     echo ""
     print_input "请在浏览器完成授权后，按回车键继续..."
@@ -309,37 +261,49 @@ setup_tunnel() {
     # 设置证书环境变量
     export TUNNEL_ORIGIN_CERT="/root/.cloudflared/cert.pem"
     
-    # 创建隧道
-    print_info "创建隧道: $TUNNEL_NAME"
-    "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME"
+    # 检查是否已存在同名隧道
+    print_info "检查是否已存在同名隧道..."
+    local existing_tunnel
+    existing_tunnel=$("$BIN_DIR/cloudflared" tunnel list | grep "$TUNNEL_NAME" | awk '{print $1}')
     
-    # 检查隧道是否创建成功
-    local tunnel_json_file="/root/.cloudflared/${TUNNEL_NAME}.json"
-    if [[ ! -f "$tunnel_json_file" ]]; then
-        print_error "隧道创建失败，可能的原因："
-        print_error "1. 证书无效"
-        print_error "2. 网络连接问题"
-        print_error "3. Cloudflare API 限制"
-        echo ""
-        print_info "尝试列出已有隧道："
-        "$BIN_DIR/cloudflared" tunnel list
-        exit 1
+    if [[ -n "$existing_tunnel" ]]; then
+        print_warning "发现同名隧道，使用现有隧道: $existing_tunnel"
+        local tunnel_id="$existing_tunnel"
+    else
+        # 创建新隧道
+        print_info "创建隧道: $TUNNEL_NAME"
+        "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME"
+        
+        # 获取隧道ID
+        local tunnel_id
+        tunnel_id=$("$BIN_DIR/cloudflared" tunnel list | grep "$TUNNEL_NAME" | awk '{print $1}')
+        
+        if [[ -z "$tunnel_id" ]]; then
+            print_error "无法获取隧道ID"
+            print_info "尝试直接列出所有隧道："
+            "$BIN_DIR/cloudflared" tunnel list
+            exit 1
+        fi
     fi
     
-    print_success "隧道创建成功"
+    # 查找JSON文件（可能以隧道ID命名）
+    local json_file="/root/.cloudflared/${tunnel_id}.json"
+    if [[ ! -f "$json_file" ]]; then
+        # 尝试查找以隧道名命名的文件
+        json_file="/root/.cloudflared/${TUNNEL_NAME}.json"
+        if [[ ! -f "$json_file" ]]; then
+            # 查找所有JSON文件
+            json_file=$(find /root/.cloudflared -name "*.json" -type f | head -1)
+        fi
+    fi
     
     # 绑定域名
     print_info "绑定域名: $USER_DOMAIN"
     "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN"
     
-    # 获取隧道ID
-    local tunnel_id
-    tunnel_id=$(grep -o '"TunnelID":"[^"]*"' "$tunnel_json_file" | cut -d'"' -f4)
-    
-    if [[ -n "$tunnel_id" ]]; then
-        # 保存隧道配置
-        mkdir -p "$CONFIG_DIR"
-        cat > "$CONFIG_DIR/tunnel.conf" << EOF
+    # 保存隧道配置
+    mkdir -p "$CONFIG_DIR"
+    cat > "$CONFIG_DIR/tunnel.conf" << EOF
 # Cloudflare Tunnel 配置
 TUNNEL_ID=$tunnel_id
 TUNNEL_NAME=$TUNNEL_NAME
@@ -347,13 +311,14 @@ DOMAIN=$USER_DOMAIN
 CERT_PATH=/root/.cloudflared/cert.pem
 CREATED_TIME=$(date +"%Y-%m-%d %H:%M:%S")
 EOF
-        
-        print_success "隧道设置完成 (ID: ${tunnel_id:0:8}...)"
-    else
-        print_error "无法获取隧道ID，请手动检查："
-        cat "$tunnel_json_file"
-        exit 1
+    
+    # 如果找到了JSON文件，记录路径
+    if [[ -f "$json_file" ]]; then
+        echo "TUNNEL_JSON=$json_file" >> "$CONFIG_DIR/tunnel.conf"
+        print_info "隧道凭证文件: $json_file"
     fi
+    
+    print_success "✅ 隧道设置完成 (ID: ${tunnel_id})"
 }
 
 # ----------------------------
@@ -418,9 +383,15 @@ configure_xray() {
 EOF
     
     # 创建隧道配置文件
+    # 使用正确的JSON文件路径
+    local json_path="/root/.cloudflared/${tunnel_id}.json"
+    if [[ ! -f "$json_path" ]]; then
+        json_path="/root/.cloudflared/${TUNNEL_NAME}.json"
+    fi
+    
     cat > "$CONFIG_DIR/config.yaml" << EOF
 tunnel: $tunnel_id
-credentials-file: /root/.cloudflared/$tunnel_id.json
+credentials-file: $json_path
 originCert: /root/.cloudflared/cert.pem
 
 ingress:
@@ -602,6 +573,37 @@ show_connection_info() {
 }
 
 # ----------------------------
+# 显示状态
+# ----------------------------
+show_status() {
+    print_info "系统服务状态:"
+    systemctl status secure-tunnel-xray.service secure-tunnel-argo.service --no-pager
+    
+    echo ""
+    print_info "隧道状态:"
+    "$BIN_DIR/cloudflared" tunnel list || true
+    
+    echo ""
+    print_info "证书状态:"
+    if [[ -f "/root/.cloudflared/cert.pem" ]]; then
+        print_success "✅ 证书存在"
+        ls -lh "/root/.cloudflared/cert.pem"
+    else
+        print_error "❌ 证书不存在"
+    fi
+    
+    echo ""
+    print_info "JSON文件状态:"
+    if [[ -f "/root/.cloudflared/${TUNNEL_NAME}.json" ]]; then
+        print_success "✅ 找到隧道JSON文件: /root/.cloudflared/${TUNNEL_NAME}.json"
+    elif [[ -f "/root/.cloudflared/*.json" ]]; then
+        print_info "找到JSON文件: $(ls /root/.cloudflared/*.json 2>/dev/null | head -1)"
+    else
+        print_error "❌ 未找到隧道JSON文件"
+    fi
+}
+
+# ----------------------------
 # 主安装流程
 # ----------------------------
 main_install() {
@@ -626,27 +628,6 @@ main_install() {
 }
 
 # ----------------------------
-# 显示状态
-# ----------------------------
-show_status() {
-    print_info "系统服务状态:"
-    systemctl status secure-tunnel-xray.service secure-tunnel-argo.service --no-pager
-    
-    echo ""
-    print_info "隧道状态:"
-    "$BIN_DIR/cloudflared" tunnel list || true
-    
-    echo ""
-    print_info "证书状态:"
-    if [[ -f "/root/.cloudflared/cert.pem" ]]; then
-        print_success "✅ 证书存在"
-        ls -lh "/root/.cloudflared/cert.pem"
-    else
-        print_error "❌ 证书不存在"
-    fi
-}
-
-# ----------------------------
 # 主函数
 # ----------------------------
 main() {
@@ -654,7 +635,7 @@ main() {
     echo ""
     echo "╔══════════════════════════════════════════════╗"
     echo "║    Cloudflare Tunnel 一键安装脚本            ║"
-    echo "║                版本4.1 (直接授权版)          ║"
+    echo "║                版本4.2 (修复版)              ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
     
@@ -691,6 +672,17 @@ main() {
             print_info "重新授权..."
             direct_cloudflare_auth
             ;;
+        "fix-json")
+            print_info "修复JSON文件..."
+            if [[ -f "$CONFIG_DIR/tunnel.conf" ]]; then
+                source "$CONFIG_DIR/tunnel.conf"
+                if [[ -n "$TUNNEL_ID" ]]; then
+                    echo "隧道ID: $TUNNEL_ID"
+                    # 查找JSON文件
+                    find /root/.cloudflared -name "*.json" -exec ls -la {} \;
+                fi
+            fi
+            ;;
         *)
             echo "使用方法:"
             echo "  sudo $0 install      # 安装"
@@ -698,6 +690,7 @@ main() {
             echo "  sudo $0 restart      # 重启服务"
             echo "  sudo $0 config       # 查看配置"
             echo "  sudo $0 auth         # 重新授权"
+            echo "  sudo $0 fix-json     # 修复JSON文件"
             echo "  sudo $0 uninstall    # 卸载"
             exit 1
             ;;
