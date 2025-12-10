@@ -5,6 +5,7 @@
 这是一个自动化部署 Cloudflare Tunnel 与 Xray-core 的 Bash 脚本，能够快速搭建一个基于 Cloudflare Argo Tunnel 的安全代理隧道。该脚本实现了免端口暴露、自动 SSL 证书签发和 WebSocket 代理功能。
 
 功能特性
+
 ✅ 一键安装 - 全自动部署 Xray-core 和 Cloudflare Tunnel
 
 ✅ 智能配置 - 自动生成 VLESS + WebSocket + TLS 配置
