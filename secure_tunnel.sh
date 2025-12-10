@@ -160,56 +160,67 @@ manual_cloudflare_auth() {
     print_warning "═══════════════════════════════════════════════"
     echo ""
     
-    # 生成授权URL
     print_info "请按照以下步骤操作："
     echo ""
-    print_info "1. 在您的电脑浏览器中访问以下链接："
-    echo ""
     
-    # 使用cloudflared生成授权URL
+    # 方法1：使用临时文件捕获输出
+    print_info "方法1：自动获取链接（推荐）"
+    echo "正在生成授权链接..."
+    
     local auth_url
-    auth_url=$("$BIN_DIR/cloudflared" tunnel login 2>&1 | grep -o 'https://[^ ]*' | head -1)
+    # 创建一个临时文件来捕获cloudflared的输出
+    local temp_output=$(mktemp)
     
-    if [[ -z "$auth_url" ]]; then
-        # 如果无法获取URL，使用备用方法
-        print_warning "无法自动获取授权链接，请手动运行以下命令获取："
+    # 在后台运行cloudflared并捕获输出
+    timeout 10 /usr/local/bin/cloudflared tunnel login 2>&1 | tee "$temp_output" &
+    local cloudflared_pid=$!
+    
+    # 等待几秒获取链接
+    sleep 3
+    
+    # 从输出中提取链接
+    auth_url=$(grep -o 'https://[^ ]*' "$temp_output" | head -1)
+    
+    # 清理进程
+    kill $cloudflared_pid 2>/dev/null || true
+    rm -f "$temp_output"
+    
+    if [[ -n "$auth_url" ]]; then
+        print_info "授权链接已生成："
         echo ""
-        echo "  $BIN_DIR/cloudflared tunnel login"
-        echo ""
-        print_input "请按回车键继续，然后在新的终端中手动获取授权URL..."
-        read -r
-    else
-        echo "    $auth_url"
+        echo "    🔗 $auth_url"
         echo ""
         print_info "2. 在浏览器中登录您的Cloudflare账户并授权"
-        print_info "3. 授权成功后返回此处继续"
+        print_info "3. 授权成功后返回此处按回车继续"
         echo ""
-        
-        # 尝试打开浏览器（如果是在桌面环境）
-        if [[ -n "$DISPLAY" ]] && command -v xdg-open &> /dev/null; then
-            print_input "是否尝试自动打开浏览器？(Y/n):"
-            read -r open_browser
-            if [[ "$open_browser" != "n" && "$open_browser" != "N" ]]; then
-                xdg-open "$auth_url" 2>/dev/null &
-            fi
-        fi
+    else
+        # 方法2：手动获取
+        print_warning "无法自动获取链接，请手动获取："
+        echo ""
+        print_info "请在新的终端窗口中运行以下命令："
+        echo ""
+        echo "  /usr/local/bin/cloudflared tunnel login"
+        echo ""
+        print_info "命令运行后会显示一个 https://... 的链接"
+        print_info "复制该链接到浏览器打开并授权"
+        echo ""
     fi
     
     print_input "请在浏览器完成授权后，按回车键继续安装..."
     read -r
     
     # 验证授权是否成功
-    if [[ ! -d "/root/.cloudflared" ]] || [[ ! -f "/root/.cloudflared/cert.pem" ]]; then
-        print_error "未检测到授权成功！"
-        print_error "请检查是否已完成浏览器授权，或手动运行："
+    if [[ ! -f "/root/.cloudflared/cert.pem" ]]; then
+        print_error "⚠️  未检测到授权证书！"
+        print_error "请确认："
+        print_error "1. 是否已在浏览器完成授权"
+        print_error "2. 授权时是否使用了正确的Cloudflare账户"
         echo ""
-        echo "  $BIN_DIR/cloudflared tunnel login"
-        echo ""
-        print_input "手动完成后按回车键继续..."
+        print_input "如果已授权成功，按回车继续；如果需要重新授权，按 Ctrl+C 退出后重试"
         read -r
+    else
+        print_success "✅ Cloudflare 授权完成"
     fi
-    
-    print_success "Cloudflare 授权完成"
 }
 
 # ----------------------------
