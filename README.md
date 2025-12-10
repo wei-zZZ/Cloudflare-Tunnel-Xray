@@ -64,18 +64,21 @@ sudo PROTOCOL="vless" ARGO_IP_VERSION="6" ./secure_tunnel.sh install
 ```
 
 3. 手动配置 Argo Tunnel
-
-```bash
+4. 
 # 1. 登录 Cloudflare（会打开浏览器）
+```bash
 sudo -u secure_tunnel cloudflared tunnel login
-
+```
 # 2. 创建隧道
+```bash
 sudo -u secure_tunnel cloudflared tunnel create secure_tunnel
-
+```
 # 3. 绑定域名
+```bash
 sudo -u secure_tunnel cloudflared tunnel route dns secure_tunnel your-domain.com
-
+```
 # 4. 获取隧道 Token 并保存
+```bash
 sudo -u secure_tunnel cloudflared tunnel token secure_tunnel | sudo tee /etc/secure_tunnel/argo-token.txt
 ```
 
