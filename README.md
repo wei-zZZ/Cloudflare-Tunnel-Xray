@@ -42,20 +42,10 @@ IPv4/IPv6 双栈 支持双协议栈测试和连接
 1. 下载脚本
 
 下载最新版本脚本
+添加执行权限
+一键安装（包含域名优选）
 ```bash
-wget secure_tunnel.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/secure_tunnel.sh
-```
- 添加执行权限
-```bash
-chmod +x secure_tunnel.sh
-```
-
-2. 完整安装
-
-
-# 一键安装（包含域名优选）
-```bash
-sudo ./secure_tunnel.sh install
+wget -O secure_tunnel.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/secure_tunnel.sh && chmod +x secure_tunnel.sh && sudo ./secure_tunnel.sh install
 ```
 
 # 或使用自定义参数
