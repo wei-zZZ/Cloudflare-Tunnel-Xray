@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
 # Cloudflare Tunnel + Xray 安装脚本 (Root版)
-# 版本: 4.0 - 增强证书获取功能
+# 版本: 4.1 - 直接服务器授权版
 # ============================================
 
 set -e
@@ -44,7 +44,7 @@ collect_user_info() {
     echo ""
     echo "╔══════════════════════════════════════════════╗"
     echo "║    Cloudflare Tunnel 安装脚本                ║"
-    echo "║                版本 4.0                      ║"
+    echo "║                版本 4.1                      ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
     
@@ -95,7 +95,7 @@ check_system() {
     fi
     
     # 检查必要工具
-    local required_tools=("curl" "unzip" "wget" "timeout")
+    local required_tools=("curl" "unzip" "wget")
     for tool in "${required_tools[@]}"; do
         if ! command -v "$tool" &> /dev/null; then
             print_info "安装 $tool..."
@@ -152,118 +152,145 @@ install_components() {
 }
 
 # ----------------------------
-# 增强版浏览器授权（确保证书生成）
+# 直接服务器授权（无浏览器）
 # ----------------------------
-manual_cloudflare_auth() {
+direct_cloudflare_auth() {
     print_warning "═══════════════════════════════════════════════"
-    print_warning "    需要手动完成 Cloudflare 授权"
+    print_warning "    服务器直接授权模式"
     print_warning "═══════════════════════════════════════════════"
     echo ""
     
-    # 清空旧证书（避免冲突）
-    print_info "清理旧证书配置..."
+    # 清理旧配置
+    print_info "清理旧配置..."
     rm -rf /root/.cloudflared
     mkdir -p /root/.cloudflared
     
-    print_info "请按照以下步骤操作："
+    print_info "开始 Cloudflare 授权..."
     echo ""
     
-    # 方法1：使用 --url-only 获取链接
-    print_info "方法1：获取授权链接"
+    # 方法：直接在服务器运行授权命令
+    print_info "正在启动 Cloudflare 授权..."
+    print_info "这将在终端中显示一个链接，请复制到浏览器打开"
+    echo ""
+    print_warning "请准备好浏览器访问以下链接："
     echo ""
     
-    local auth_url
-    auth_url=$("$BIN_DIR/cloudflared" tunnel login --url-only 2>/dev/null || true)
+    # 运行 cloudflared tunnel login，它会自动生成链接
+    # 我们需要捕获输出并显示链接
+    local temp_output=$(mktemp)
+    
+    # 启动 cloudflared login（非阻塞方式）
+    "$BIN_DIR/cloudflared" tunnel login 2>&1 | tee "$temp_output" &
+    local cloudflared_pid=$!
+    
+    # 等待几秒让链接显示
+    sleep 5
+    
+    # 从输出中提取链接
+    local auth_url=""
+    
+    # 尝试多种方式提取链接
+    while IFS= read -r line; do
+        if [[ "$line" =~ https://[^\ ]* ]]; then
+            auth_url="${BASH_REMATCH[0]}"
+            break
+        elif [[ "$line" =~ ^(http|https):// ]]; then
+            auth_url="$line"
+            break
+        fi
+    done < "$temp_output"
     
     if [[ -n "$auth_url" ]]; then
-        print_info "1. 请复制以下链接到浏览器打开："
+        print_success "✅ 获取到授权链接！"
         echo ""
-        echo "    🔗 $auth_url"
+        echo "    🔗 请复制以下链接到浏览器打开："
         echo ""
-        print_info "2. 在浏览器中登录您的Cloudflare账户并授权"
-        print_info "3. 授权成功后返回此处按回车继续"
+        echo "        $auth_url"
+        echo ""
+        print_info "授权步骤："
+        print_info "1. 用浏览器打开上面的链接"
+        print_info "2. 登录您的 Cloudflare 账户"
+        print_info "3. 选择要授权的域名"
+        print_info "4. 点击 '授权' 按钮"
+        print_info "5. 授权成功后，返回终端按回车继续"
         echo ""
     else
-        # 方法2：直接运行，让用户查看终端输出
-        print_warning "无法获取直接链接，请手动运行授权命令："
+        print_warning "⚠️  无法自动提取链接，请查看下面的输出..."
         echo ""
-        print_info "在新的终端窗口中运行以下命令："
+        cat "$temp_output"
         echo ""
-        echo "  $BIN_DIR/cloudflared tunnel login"
-        echo ""
-        print_info "命令运行后会显示一个 https://... 的链接"
+        print_info "请在输出中寻找类似 https://... 的链接"
         print_info "复制该链接到浏览器打开并授权"
-        echo ""
     fi
     
+    # 清理临时文件
+    rm -f "$temp_output"
+    
+    echo ""
     print_input "请在浏览器完成授权后，按回车键继续..."
     read -r
     
-    # 重要：运行登录命令生成证书（即使之前已经授权）
-    print_info "正在生成证书文件..."
+    # 检查授权是否成功
+    check_auth_status
+}
+
+# ----------------------------
+# 检查授权状态
+# ----------------------------
+check_auth_status() {
+    print_info "检查授权状态..."
     
-    # 设置超时并运行登录命令
-    timeout 30 "$BIN_DIR/cloudflared" tunnel login 2>&1 | tail -20 || {
-        print_warning "授权命令超时，检查证书是否已生成"
-    }
+    local max_checks=5
+    local check_count=0
     
-    # 多种方式检查证书文件
-    local cert_found=false
-    local cert_paths=(
-        "/root/.cloudflared/cert.pem"
-        "/root/.cloudflare-warp/cert.pem"
-        "/etc/cloudflared/cert.pem"
-    )
+    while [[ $check_count -lt $max_checks ]]; do
+        if [[ -f "/root/.cloudflared/cert.pem" ]]; then
+            print_success "✅ 授权成功！证书已生成"
+            print_info "证书位置: /root/.cloudflared/cert.pem"
+            print_info "证书大小: $(ls -lh "/root/.cloudflared/cert.pem" | awk '{print $5}')"
+            return 0
+        fi
+        
+        print_info "等待证书生成... (${check_count}/5)"
+        sleep 3
+        ((check_count++))
+    done
     
-    for cert_path in "${cert_paths[@]}"; do
+    # 如果还没找到证书，尝试其他位置
+    print_warning "未找到标准位置的证书，尝试其他位置..."
+    
+    local found_cert=""
+    for cert_path in "/root/.cloudflared/cert.pem" "/root/.cloudflare-warp/cert.pem" "/etc/cloudflared/cert.pem"; do
         if [[ -f "$cert_path" ]]; then
-            print_success "✅ 找到证书文件: $cert_path"
-            CERT_PATH="$cert_path"
-            
-            # 复制证书到标准位置
-            if [[ "$cert_path" != "/root/.cloudflared/cert.pem" ]]; then
-                cp "$cert_path" "/root/.cloudflared/cert.pem"
-                CERT_PATH="/root/.cloudflared/cert.pem"
-            fi
-            
-            cert_found=true
+            found_cert="$cert_path"
             break
         fi
     done
     
-    if $cert_found; then
-        print_success "✅ Cloudflare 授权完成"
-        print_info "证书大小: $(ls -lh "$CERT_PATH" | awk '{print $5}')"
-        
-        # 设置环境变量
-        export TUNNEL_ORIGIN_CERT="$CERT_PATH"
-        print_info "证书路径已设置: $CERT_PATH"
-    else
-        print_error "⚠️  未检测到授权证书！"
-        print_error "可能的原因："
-        print_error "1. 授权未完成"
-        print_error "2. 浏览器未成功连接"
-        print_error "3. 网络问题"
-        echo ""
-        
-        # 尝试手动查找证书
-        print_info "尝试查找证书文件..."
-        find / -name "cert.pem" 2>/dev/null | grep -E "\.cloudflared|\.cloudflare-warp" || true
-        
-        print_input "如果已授权成功，按回车继续；如果需要重新授权，请按 Ctrl+C 退出后重试"
-        read -r
-        
-        # 最后一次检查
-        if [[ -f "/root/.cloudflared/cert.pem" ]]; then
-            print_success "✅ 找到证书文件，继续安装..."
-        else
-            print_error "仍然没有找到证书文件，安装无法继续"
-            print_info "请手动运行以下命令获取证书："
-            echo "  $BIN_DIR/cloudflared tunnel login"
-            echo "然后重新运行此脚本"
-            exit 1
-        fi
+    if [[ -n "$found_cert" ]]; then
+        # 复制到标准位置
+        cp "$found_cert" "/root/.cloudflared/cert.pem"
+        print_success "✅ 找到证书并复制到标准位置"
+        print_info "证书位置: /root/.cloudflared/cert.pem"
+        return 0
     fi
+    
+    print_error "❌ 未检测到授权证书！"
+    print_error "可能的原因："
+    print_error "1. 授权未完成"
+    print_error "2. 使用了错误的 Cloudflare 账户"
+    print_error "3. 未选择正确的域名"
+    echo ""
+    
+    # 提供手动选项
+    print_input "按回车键重试授权，或按 Ctrl+C 退出"
+    read -r
+    
+    # 杀掉可能还在运行的 cloudflared 进程
+    pkill -f "cloudflared tunnel login" 2>/dev/null || true
+    
+    # 重新尝试
+    direct_cloudflare_auth
 }
 
 # ----------------------------
@@ -287,7 +314,8 @@ setup_tunnel() {
     "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME"
     
     # 检查隧道是否创建成功
-    if [[ ! -f "/root/.cloudflared/$TUNNEL_NAME.json" ]]; then
+    local tunnel_json_file="/root/.cloudflared/${TUNNEL_NAME}.json"
+    if [[ ! -f "$tunnel_json_file" ]]; then
         print_error "隧道创建失败，可能的原因："
         print_error "1. 证书无效"
         print_error "2. 网络连接问题"
@@ -298,26 +326,32 @@ setup_tunnel() {
         exit 1
     fi
     
+    print_success "隧道创建成功"
+    
     # 绑定域名
     print_info "绑定域名: $USER_DOMAIN"
     "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN"
     
     # 获取隧道ID
     local tunnel_id
-    tunnel_id=$("$BIN_DIR/cloudflared" tunnel list | grep "$TUNNEL_NAME" | awk '{print $1}' | head -1)
+    tunnel_id=$(grep -o '"TunnelID":"[^"]*"' "$tunnel_json_file" | cut -d'"' -f4)
     
     if [[ -n "$tunnel_id" ]]; then
         # 保存隧道配置
         mkdir -p "$CONFIG_DIR"
-        echo "TUNNEL_ID=$tunnel_id" > "$CONFIG_DIR/tunnel.conf"
-        echo "TUNNEL_NAME=$TUNNEL_NAME" >> "$CONFIG_DIR/tunnel.conf"
-        echo "DOMAIN=$USER_DOMAIN" >> "$CONFIG_DIR/tunnel.conf"
-        echo "CERT_PATH=/root/.cloudflared/cert.pem" >> "$CONFIG_DIR/tunnel.conf"
+        cat > "$CONFIG_DIR/tunnel.conf" << EOF
+# Cloudflare Tunnel 配置
+TUNNEL_ID=$tunnel_id
+TUNNEL_NAME=$TUNNEL_NAME
+DOMAIN=$USER_DOMAIN
+CERT_PATH=/root/.cloudflared/cert.pem
+CREATED_TIME=$(date +"%Y-%m-%d %H:%M:%S")
+EOF
         
         print_success "隧道设置完成 (ID: ${tunnel_id:0:8}...)"
     else
-        print_error "无法获取隧道ID，尝试手动查找："
-        "$BIN_DIR/cloudflared" tunnel list
+        print_error "无法获取隧道ID，请手动检查："
+        cat "$tunnel_json_file"
         exit 1
     fi
 }
@@ -342,7 +376,7 @@ configure_xray() {
     uuid=$(cat /proc/sys/kernel/random/uuid)
     local port=10000  # 固定端口，便于管理
     
-    # 保存到配置文件
+    # 追加到配置文件
     echo "UUID=$uuid" >> "$CONFIG_DIR/tunnel.conf"
     echo "PORT=$port" >> "$CONFIG_DIR/tunnel.conf"
     
@@ -394,6 +428,13 @@ ingress:
     service: http://localhost:$port
     originRequest:
       noTLSVerify: true
+      connectTimeout: 30s
+      tlsTimeout: 30s
+      tcpKeepAlive: 30s
+      noHappyEyeballs: false
+      keepAliveConnections: 100
+      keepAliveTimeout: 90s
+      httpHostHeader: $USER_DOMAIN
   - service: http_status:404
 EOF
     
@@ -445,7 +486,8 @@ Wants=network.target
 Type=simple
 User=root
 Group=root
-Environment=TUNNEL_ORIGIN_CERT=/root/.cloudflared/cert.pem
+Environment="TUNNEL_ORIGIN_CERT=/root/.cloudflared/cert.pem"
+Environment="TUNNEL_METRICS=0.0.0.0:8080"
 ExecStart=$BIN_DIR/cloudflared tunnel --config $CONFIG_DIR/config.yaml run
 Restart=on-failure
 RestartSec=5
@@ -477,6 +519,9 @@ start_services() {
         journalctl -u secure-tunnel-xray.service -n 10 --no-pager
     fi
     
+    # 等待Xray启动
+    sleep 2
+    
     # 启动Argo Tunnel
     systemctl enable secure-tunnel-argo.service
     if systemctl start secure-tunnel-argo.service; then
@@ -487,7 +532,7 @@ start_services() {
     fi
     
     # 等待服务稳定
-    sleep 2
+    sleep 3
 }
 
 # ----------------------------
@@ -507,35 +552,53 @@ show_connection_info() {
     
     source "$CONFIG_DIR/tunnel.conf" 2>/dev/null
     
-    print_success "域名: $DOMAIN"
-    print_success "UUID: $UUID"
-    print_success "端口: 443 (TLS) / 80 (非TLS)"
-    print_success "路径: /$UUID"
+    print_success "🔗 域名: $DOMAIN"
+    print_success "🔑 UUID: $UUID"
+    print_success "🚪 端口: 443 (TLS) / 80 (非TLS)"
+    print_success "🛣️  路径: /$UUID"
     echo ""
     
-    print_info "VLESS 连接配置:"
+    print_info "📋 VLESS 连接配置:"
     echo ""
     echo "vless://${UUID}@${DOMAIN}:443?encryption=none&security=tls&type=ws&host=${DOMAIN}&path=/${UUID}#安全隧道"
     echo ""
     
-    print_info "服务管理命令:"
+    print_info "⚙️  Clash 配置:"
+    echo ""
+    echo "- name: 安全隧道"
+    echo "  type: vless"
+    echo "  server: ${DOMAIN}"
+    echo "  port: 443"
+    echo "  uuid: ${UUID}"
+    echo "  network: ws"
+    echo "  tls: true"
+    echo "  udp: true"
+    echo "  ws-opts:"
+    echo "    path: /${UUID}"
+    echo "    headers:"
+    echo "      Host: ${DOMAIN}"
+    echo ""
+    
+    print_info "🔧 服务管理命令:"
     echo "  启动: systemctl start secure-tunnel-{xray,argo}"
     echo "  停止: systemctl stop secure-tunnel-{xray,argo}"
     echo "  状态: systemctl status secure-tunnel-{xray,argo}"
+    echo "  重启: systemctl restart secure-tunnel-{xray,argo}"
     echo "  日志: journalctl -u secure-tunnel-argo.service -f"
     echo ""
     
-    print_info "配置文件位置:"
+    print_info "📁 配置文件位置:"
     echo "  Xray配置: $CONFIG_DIR/xray.json"
     echo "  隧道配置: $CONFIG_DIR/config.yaml"
     echo "  连接信息: $CONFIG_DIR/tunnel.conf"
     echo "  证书位置: /root/.cloudflared/cert.pem"
     echo ""
     
-    print_warning "重要提示:"
+    print_warning "⚠️ 重要提示:"
     print_warning "1. 请等待几分钟让DNS生效"
     print_warning "2. 在Cloudflare DNS中确认 $DOMAIN 已正确解析"
     print_warning "3. 首次连接可能需要等待证书签发"
+    print_warning "4. 检查防火墙是否开放端口"
 }
 
 # ----------------------------
@@ -550,7 +613,7 @@ main_install() {
     # 执行安装步骤
     check_system
     install_components
-    manual_cloudflare_auth
+    direct_cloudflare_auth
     setup_tunnel
     configure_xray
     configure_services
@@ -563,6 +626,27 @@ main_install() {
 }
 
 # ----------------------------
+# 显示状态
+# ----------------------------
+show_status() {
+    print_info "系统服务状态:"
+    systemctl status secure-tunnel-xray.service secure-tunnel-argo.service --no-pager
+    
+    echo ""
+    print_info "隧道状态:"
+    "$BIN_DIR/cloudflared" tunnel list || true
+    
+    echo ""
+    print_info "证书状态:"
+    if [[ -f "/root/.cloudflared/cert.pem" ]]; then
+        print_success "✅ 证书存在"
+        ls -lh "/root/.cloudflared/cert.pem"
+    else
+        print_error "❌ 证书不存在"
+    fi
+}
+
+# ----------------------------
 # 主函数
 # ----------------------------
 main() {
@@ -570,7 +654,7 @@ main() {
     echo ""
     echo "╔══════════════════════════════════════════════╗"
     echo "║    Cloudflare Tunnel 一键安装脚本            ║"
-    echo "║                版本4.0 (增强版)              ║"
+    echo "║                版本4.1 (直接授权版)          ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
     
@@ -579,7 +663,7 @@ main() {
             main_install
             ;;
         "status")
-            systemctl status secure-tunnel-xray.service secure-tunnel-argo.service --no-pager
+            show_status
             ;;
         "restart")
             systemctl restart secure-tunnel-xray.service secure-tunnel-argo.service
@@ -591,7 +675,7 @@ main() {
             systemctl disable secure-tunnel-xray.service secure-tunnel-argo.service 2>/dev/null || true
             rm -f /etc/systemd/system/secure-tunnel-*.service
             systemctl daemon-reload
-            rm -rf "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
+            rm -rf "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" "/root/.cloudflared"
             userdel "$SERVICE_USER" 2>/dev/null || true
             print_success "卸载完成"
             ;;
@@ -603,15 +687,9 @@ main() {
                 print_error "未找到配置文件"
             fi
             ;;
-        "cert-check")
-            print_info "检查证书状态:"
-            if [[ -f "/root/.cloudflared/cert.pem" ]]; then
-                print_success "✅ 证书存在: /root/.cloudflared/cert.pem"
-                echo "证书信息:"
-                ls -lh "/root/.cloudflared/cert.pem"
-            else
-                print_error "❌ 证书不存在"
-            fi
+        "auth")
+            print_info "重新授权..."
+            direct_cloudflare_auth
             ;;
         *)
             echo "使用方法:"
@@ -619,7 +697,7 @@ main() {
             echo "  sudo $0 status       # 查看状态"
             echo "  sudo $0 restart      # 重启服务"
             echo "  sudo $0 config       # 查看配置"
-            echo "  sudo $0 cert-check   # 检查证书"
+            echo "  sudo $0 auth         # 重新授权"
             echo "  sudo $0 uninstall    # 卸载"
             exit 1
             ;;
