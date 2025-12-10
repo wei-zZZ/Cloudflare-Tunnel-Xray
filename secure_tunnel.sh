@@ -375,37 +375,41 @@ configure_xray() {
     # 创建配置目录
     mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     
-    # 生成Xray配置文件
+    # 生成Xray配置文件（适配 Xray-core 25.x 版本）
     cat > "$CONFIG_DIR/xray.json" << EOF
 {
     "log": {
-        "loglevel": "warning",
-        "access": "$LOG_DIR/xray-access.log",
-        "error": "$LOG_DIR/xray-error.log"
+        "loglevel": "warning"
     },
-    "inbounds": [{
-        "port": $port,
-        "listen": "127.0.0.1",
-        "protocol": "vless",
-        "settings": {
-            "clients": [{
-                "id": "$uuid",
-                "flow": ""
-            }],
-            "decryption": "none"
-        },
-        "streamSettings": {
-            "network": "ws",
-            "security": "none",
-            "wsSettings": {
-                "path": "/$uuid"
+    "inbounds": [
+        {
+            "port": $port,
+            "listen": "127.0.0.1",
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$uuid",
+                        "level": 0
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "ws",
+                "security": "none",
+                "wsSettings": {
+                    "path": "/$uuid"
+                }
             }
         }
-    }],
-    "outbounds": [{
-        "protocol": "freedom",
-        "settings": {}
-    }]
+    ],
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "tag": "direct"
+        }
+    ]
 }
 EOF
     
