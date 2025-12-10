@@ -43,7 +43,7 @@ IPv4/IPv6 双栈 支持双协议栈测试和连接
 
 ```bash
 # 下载最新版本脚本
-curl -L -o secure_tunnel.sh https://raw.githubusercontent.com/your-repo/secure-tunnel/main/secure_tunnel.sh
+curl -L -o secure_tunnel.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/secure_tunnel.sh
 
 # 添加执行权限
 chmod +x secure_tunnel.sh
