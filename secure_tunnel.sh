@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
-# Cloudflare Tunnel + Xray 交互式安装脚本
-# 版本: 3.0 (交互式增强版)
+# Cloudflare Tunnel + Xray 安装脚本 (Root版)
+# 版本: 4.0 - 支持手动浏览器授权
 # ============================================
 
 set -e
@@ -34,9 +34,7 @@ SERVICE_GROUP="secure_tunnel"
 
 # 用户输入变量
 USER_DOMAIN=""
-TUNNEL_NAME=""
-PROTOCOL="vless"
-ARGO_IP_VERSION="4"
+TUNNEL_NAME="secure-tunnel"
 
 # ----------------------------
 # 收集用户信息
@@ -45,7 +43,8 @@ collect_user_info() {
     clear
     echo ""
     echo "╔══════════════════════════════════════════════╗"
-    echo "║    Cloudflare Tunnel 交互式安装向导          ║"
+    echo "║    Cloudflare Tunnel 安装脚本                ║"
+    echo "║                版本 4.0                      ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
     
@@ -67,30 +66,12 @@ collect_user_info() {
     read -r TUNNEL_NAME
     TUNNEL_NAME=${TUNNEL_NAME:-"secure-tunnel"}
     
-    # 选择协议
-    print_input "选择协议 (1=vless, 2=vmess) [默认: 1]:"
-    read -r protocol_choice
-    case "$protocol_choice" in
-        2) PROTOCOL="vmess" ;;
-        *) PROTOCOL="vless" ;;
-    esac
-    
-    # 选择IP版本
-    print_input "选择IP版本 (1=IPv4, 2=IPv6) [默认: 1]:"
-    read -r ip_choice
-    case "$ip_choice" in
-        2) ARGO_IP_VERSION="6" ;;
-        *) ARGO_IP_VERSION="4" ;;
-    esac
-    
     # 显示汇总信息
     echo ""
     print_info "配置摘要:"
     echo "  ┌─────────────────────────────────────┐"
     echo "  │   域名: $USER_DOMAIN"
     echo "  │   隧道名称: $TUNNEL_NAME"
-    echo "  │   协议: $PROTOCOL"
-    echo "  │   IP版本: IPv$ARGO_IP_VERSION"
     echo "  └─────────────────────────────────────┘"
     echo ""
     
@@ -103,7 +84,7 @@ collect_user_info() {
 }
 
 # ----------------------------
-# 系统检查与准备
+# 系统检查
 # ----------------------------
 check_system() {
     print_info "检查系统环境..."
@@ -114,7 +95,7 @@ check_system() {
     fi
     
     # 检查必要工具
-    local required_tools=("curl" "unzip" "jq")
+    local required_tools=("curl" "unzip" "wget")
     for tool in "${required_tools[@]}"; do
         if ! command -v "$tool" &> /dev/null; then
             print_info "安装 $tool..."
@@ -126,32 +107,6 @@ check_system() {
     done
     
     print_success "系统检查完成"
-}
-
-setup_user_and_dirs() {
-    print_info "设置用户和目录..."
-    
-    # 创建系统用户（指定主目录）
-    if ! id -u "$SERVICE_USER" &> /dev/null; then
-        useradd -r -m -s /usr/sbin/nologin -d "/home/$SERVICE_USER" "$SERVICE_USER"
-        print_success "创建用户: $SERVICE_USER"
-    else
-        # 如果用户已存在但没主目录，则创建
-        if [ ! -d "/home/$SERVICE_USER" ]; then
-            mkdir -p "/home/$SERVICE_USER"
-            chown -R "$SERVICE_USER:$SERVICE_GROUP" "/home/$SERVICE_USER"
-        fi
-    fi
-    
-    # 创建其他目录
-    local dirs=("$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR")
-    for dir in "${dirs[@]}"; do
-        mkdir -p "$dir"
-        chown -R "$SERVICE_USER:$SERVICE_GROUP" "$dir"
-        chmod 750 "$dir"
-    done
-    
-    print_success "目录设置完成"
 }
 
 # ----------------------------
@@ -180,14 +135,14 @@ install_components() {
     
     # 下载并安装 Xray
     print_info "下载 Xray..."
-    curl -L --progress-bar "$xray_url" -o /tmp/xray.zip
+    wget -q --show-progress -O /tmp/xray.zip "$xray_url"
     unzip -q -d /tmp /tmp/xray.zip
     find /tmp -name "xray" -type f -exec mv {} "$BIN_DIR/" \;
     chmod +x "$BIN_DIR/xray"
     
     # 下载并安装 cloudflared
     print_info "下载 cloudflared..."
-    curl -L --progress-bar "$cf_url" -o "$BIN_DIR/cloudflared"
+    wget -q --show-progress -O "$BIN_DIR/cloudflared" "$cf_url"
     chmod +x "$BIN_DIR/cloudflared"
     
     # 清理临时文件
@@ -197,49 +152,115 @@ install_components() {
 }
 
 # ----------------------------
-# 配置 Cloudflare Tunnel
+# 手动浏览器授权
 # ----------------------------
-configure_cloudflare_tunnel() {
-    print_info "配置 Cloudflare Tunnel..."
+manual_cloudflare_auth() {
+    print_warning "═══════════════════════════════════════════════"
+    print_warning "    需要手动完成 Cloudflare 授权"
+    print_warning "═══════════════════════════════════════════════"
+    echo ""
     
-    # 第一步：登录（会打开浏览器）
-    print_warning "请在浏览器中完成 Cloudflare 登录授权..."
-    sudo -u "$SERVICE_USER" "$BIN_DIR/cloudflared" tunnel login
+    # 生成授权URL
+    print_info "请按照以下步骤操作："
+    echo ""
+    print_info "1. 在您的电脑浏览器中访问以下链接："
+    echo ""
     
-    # 第二步：创建隧道
+    # 使用cloudflared生成授权URL
+    local auth_url
+    auth_url=$("$BIN_DIR/cloudflared" tunnel login 2>&1 | grep -o 'https://[^ ]*' | head -1)
+    
+    if [[ -z "$auth_url" ]]; then
+        # 如果无法获取URL，使用备用方法
+        print_warning "无法自动获取授权链接，请手动运行以下命令获取："
+        echo ""
+        echo "  $BIN_DIR/cloudflared tunnel login"
+        echo ""
+        print_input "请按回车键继续，然后在新的终端中手动获取授权URL..."
+        read -r
+    else
+        echo "    $auth_url"
+        echo ""
+        print_info "2. 在浏览器中登录您的Cloudflare账户并授权"
+        print_info "3. 授权成功后返回此处继续"
+        echo ""
+        
+        # 尝试打开浏览器（如果是在桌面环境）
+        if [[ -n "$DISPLAY" ]] && command -v xdg-open &> /dev/null; then
+            print_input "是否尝试自动打开浏览器？(Y/n):"
+            read -r open_browser
+            if [[ "$open_browser" != "n" && "$open_browser" != "N" ]]; then
+                xdg-open "$auth_url" 2>/dev/null &
+            fi
+        fi
+    fi
+    
+    print_input "请在浏览器完成授权后，按回车键继续安装..."
+    read -r
+    
+    # 验证授权是否成功
+    if [[ ! -d "/root/.cloudflared" ]] || [[ ! -f "/root/.cloudflared/cert.pem" ]]; then
+        print_error "未检测到授权成功！"
+        print_error "请检查是否已完成浏览器授权，或手动运行："
+        echo ""
+        echo "  $BIN_DIR/cloudflared tunnel login"
+        echo ""
+        print_input "手动完成后按回车键继续..."
+        read -r
+    fi
+    
+    print_success "Cloudflare 授权完成"
+}
+
+# ----------------------------
+# 创建隧道和配置
+# ----------------------------
+setup_tunnel() {
+    print_info "设置 Cloudflare Tunnel..."
+    
+    # 创建隧道
     print_info "创建隧道: $TUNNEL_NAME"
-    sudo -u "$SERVICE_USER" "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME"
+    "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME"
     
-    # 第三步：绑定域名
+    # 绑定域名
     print_info "绑定域名: $USER_DOMAIN"
-    sudo -u "$SERVICE_USER" "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN"
+    "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN"
     
-    # 第四步：获取并保存Token
-    print_info "获取隧道Token..."
-    sudo -u "$SERVICE_USER" "$BIN_DIR/cloudflared" tunnel token "$TUNNEL_NAME" > "$CONFIG_DIR/argo-token.txt"
-    chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR/argo-token.txt"
-    chmod 600 "$CONFIG_DIR/argo-token.txt"
+    # 获取隧道ID
+    local tunnel_id
+    tunnel_id=$("$BIN_DIR/cloudflared" tunnel list | grep "$TUNNEL_NAME" | awk '{print $1}')
     
-    print_success "Cloudflare Tunnel 配置完成"
+    if [[ -n "$tunnel_id" ]]; then
+        # 保存隧道配置
+        mkdir -p "$CONFIG_DIR"
+        echo "TUNNEL_ID=$tunnel_id" > "$CONFIG_DIR/tunnel.conf"
+        echo "TUNNEL_NAME=$TUNNEL_NAME" >> "$CONFIG_DIR/tunnel.conf"
+        echo "DOMAIN=$USER_DOMAIN" >> "$CONFIG_DIR/tunnel.conf"
+        
+        print_success "隧道设置完成 (ID: ${tunnel_id:0:8}...)"
+    else
+        print_error "无法获取隧道ID，请检查隧道是否创建成功"
+        exit 1
+    fi
 }
 
 # ----------------------------
 # 配置 Xray
 # ----------------------------
 configure_xray() {
-    print_info "配置 Xray 代理..."
+    print_info "配置 Xray..."
     
     # 生成UUID和端口
     local uuid
     uuid=$(cat /proc/sys/kernel/random/uuid)
-    local port=$((20000 + RANDOM % 10000))
+    local port=10000  # 固定端口，便于管理
     
-    # 保存基础信息
-    echo "DOMAIN=$USER_DOMAIN" > "$CONFIG_DIR/tunnel.conf"
-    echo "TUNNEL_NAME=$TUNNEL_NAME" >> "$CONFIG_DIR/tunnel.conf"
+    # 保存到配置文件
     echo "UUID=$uuid" >> "$CONFIG_DIR/tunnel.conf"
     echo "PORT=$port" >> "$CONFIG_DIR/tunnel.conf"
-    echo "PROTOCOL=$PROTOCOL" >> "$CONFIG_DIR/tunnel.conf"
+    
+    # 创建配置目录
+    mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     
     # 生成Xray配置文件
     cat > "$CONFIG_DIR/xray.json" << EOF
@@ -252,7 +273,7 @@ configure_xray() {
     "inbounds": [{
         "port": $port,
         "listen": "127.0.0.1",
-        "protocol": "$PROTOCOL",
+        "protocol": "vless",
         "settings": {
             "clients": [{
                 "id": "$uuid",
@@ -275,9 +296,16 @@ configure_xray() {
 }
 EOF
     
-    # 设置权限
-    chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR"/*
-    chmod 640 "$CONFIG_DIR"/*
+    # 创建隧道配置文件
+    cat > "$CONFIG_DIR/config.yaml" << EOF
+tunnel: $tunnel_id
+credentials-file: /root/.cloudflared/$tunnel_id.json
+
+ingress:
+  - hostname: $USER_DOMAIN
+    service: http://localhost:$port
+  - service: http_status:404
+EOF
     
     print_success "Xray 配置完成"
 }
@@ -288,22 +316,19 @@ EOF
 configure_services() {
     print_info "配置系统服务..."
     
-    # 创建 Argo Tunnel 配置文件
-    cat > "$CONFIG_DIR/config.yml" << EOF
-tunnel: $TUNNEL_NAME
-credentials-file: /home/$SERVICE_USER/.cloudflared/$(ls /home/$SERVICE_USER/.cloudflared/ | grep .json | head -1)
-ingress:
-  - hostname: $USER_DOMAIN
-    service: http://localhost:\$(grep '^PORT=' $CONFIG_DIR/tunnel.conf | cut -d= -f2)
-  - service: http_status:404
-EOF
+    # 创建专用用户（用于运行服务）
+    if ! id -u "$SERVICE_USER" &> /dev/null; then
+        useradd -r -s /usr/sbin/nologin "$SERVICE_USER"
+    fi
+    
+    # 转移文件所有权
+    chown -R "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     
     # Xray 服务文件
     cat > /etc/systemd/system/secure-tunnel-xray.service << EOF
 [Unit]
 Description=Secure Tunnel Xray Service
 After=network.target
-Wants=network.target
 
 [Service]
 Type=simple
@@ -312,8 +337,8 @@ Group=$SERVICE_GROUP
 ExecStart=$BIN_DIR/xray run -config $CONFIG_DIR/xray.json
 Restart=on-failure
 RestartSec=3
-LimitNPROC=512
-LimitNOFILE=1048576
+StandardOutput=append:$LOG_DIR/xray.log
+StandardError=append:$LOG_DIR/xray-error.log
 
 [Install]
 WantedBy=multi-user.target
@@ -323,15 +348,14 @@ EOF
     cat > /etc/systemd/system/secure-tunnel-argo.service << EOF
 [Unit]
 Description=Secure Tunnel Argo Service
-After=network.target
+After=network.target secure-tunnel-xray.service
 Wants=network.target
 
 [Service]
 Type=simple
-User=$SERVICE_USER
-Group=$SERVICE_GROUP
-Environment="TUNNEL_TRANSPORT_PROTOCOL=http2"
-ExecStart=$BIN_DIR/cloudflared tunnel --edge-ip-version $ARGO_IP_VERSION run $TUNNEL_NAME
+User=root
+Group=root
+ExecStart=$BIN_DIR/cloudflared tunnel --config $CONFIG_DIR/config.yaml run
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:$LOG_DIR/argo.log
@@ -348,123 +372,97 @@ EOF
 }
 
 # ----------------------------
-# 启动服务并生成客户端配置
+# 启动服务
 # ----------------------------
 start_services() {
     print_info "启动服务..."
     
-    # 启动Xray服务
+    # 启动Xray
     systemctl enable secure-tunnel-xray.service
-    systemctl start secure-tunnel-xray.service
-    
-    # 启动Argo Tunnel服务
-    systemctl enable secure-tunnel-argo.service
-    systemctl start secure-tunnel-argo.service
-    
-    # 等待服务启动
-    sleep 3
-    
-    # 检查服务状态
-    if systemctl is-active --quiet secure-tunnel-xray.service && \
-       systemctl is-active --quiet secure-tunnel-argo.service; then
-        print_success "所有服务启动成功"
+    if systemctl start secure-tunnel-xray.service; then
+        print_success "Xray 服务启动成功"
     else
-        print_warning "部分服务启动异常，请检查日志"
-        systemctl status secure-tunnel-xray.service secure-tunnel-argo.service --no-pager
+        print_error "Xray 服务启动失败"
+        journalctl -u secure-tunnel-xray.service -n 10 --no-pager
     fi
+    
+    # 启动Argo Tunnel
+    systemctl enable secure-tunnel-argo.service
+    if systemctl start secure-tunnel-argo.service; then
+        print_success "Argo Tunnel 服务启动成功"
+    else
+        print_error "Argo Tunnel 服务启动失败"
+        journalctl -u secure-tunnel-argo.service -n 10 --no-pager
+    fi
+    
+    # 等待服务稳定
+    sleep 2
 }
 
-generate_client_config() {
-    print_info "生成客户端配置文件..."
+# ----------------------------
+# 显示连接信息
+# ----------------------------
+show_connection_info() {
+    print_info "═══════════════════════════════════════════════"
+    print_info "           安装完成！连接信息"
+    print_info "═══════════════════════════════════════════════"
+    echo ""
     
     # 读取配置
-    source "$CONFIG_DIR/tunnel.conf"
+    source "$CONFIG_DIR/tunnel.conf" 2>/dev/null
     
-    # 生成客户端配置文件
-    cat > "$CONFIG_DIR/client-config.txt" << EOF
-# ============================================
-# 安全隧道客户端配置信息
-# 生成时间: $(date)
-# ============================================
-
-## 基本配置
-域名: $DOMAIN
-协议: $PROTOCOL
-UUID: $UUID
-端口: 443 (TLS) / 80 (非TLS)
-路径: /$UUID
-
-## VLESS 配置链接 (TLS)
-vless://$UUID@$DOMAIN:443?encryption=none&security=tls&type=ws&path=/$UUID#安全隧道
-
-## VLESS 配置链接 (非TLS)
-vless://$UUID@$DOMAIN:80?encryption=none&security=none&type=ws&path=/$UUID#安全隧道
-
-## 订阅链接 (Base64编码)
-$(echo -e "vless://$UUID@$DOMAIN:443?encryption=none&security=tls&type=ws&path=/$UUID#安全隧道" | base64 -w 0)
-
-## 配置步骤:
-1. 下载客户端 (v2rayN, Qv2ray, Clash等)
-2. 导入 VLESS 链接或订阅链接
-3. 选择服务器: $DOMAIN
-4. 启用 TLS (推荐)
-
-## 服务状态检查:
-sudo systemctl status secure-tunnel-xray.service
-sudo systemctl status secure-tunnel-argo.service
-sudo journalctl -u secure-tunnel-argo.service -f
-
-## 配置文件位置:
-Xray配置: $CONFIG_DIR/xray.json
-隧道配置: $CONFIG_DIR/config.yml
-连接信息: $CONFIG_DIR/client-config.txt
-EOF
-    
-    # 显示重要信息
-    echo ""
-    echo "╔══════════════════════════════════════════════╗"
-    echo "║           安装完成！                         ║"
-    echo "╚══════════════════════════════════════════════╝"
-    echo ""
     print_success "域名: $DOMAIN"
     print_success "UUID: $UUID"
+    print_success "端口: 443 (TLS) / 80 (非TLS)"
     print_success "路径: /$UUID"
     echo ""
-    print_info "客户端配置文件已保存至:"
-    echo "  $CONFIG_DIR/client-config.txt"
+    
+    print_info "VLESS 连接配置:"
     echo ""
-    print_info "查看完整配置:"
-    echo "  cat $CONFIG_DIR/client-config.txt"
+    echo "vless://${UUID}@${DOMAIN}:443?encryption=none&security=tls&type=ws&host=${DOMAIN}&path=/${UUID}#安全隧道"
     echo ""
+    
     print_info "服务管理命令:"
-    echo "  启动服务: systemctl start secure-tunnel-{xray,argo}"
-    echo "  停止服务: systemctl stop secure-tunnel-{xray,argo}"
-    echo "  查看状态: systemctl status secure-tunnel-{xray,argo}"
-    echo "  查看日志: journalctl -u secure-tunnel-argo.service -f"
+    echo "  启动: systemctl start secure-tunnel-{xray,argo}"
+    echo "  停止: systemctl stop secure-tunnel-{xray,argo}"
+    echo "  状态: systemctl status secure-tunnel-{xray,argo}"
+    echo "  日志: journalctl -u secure-tunnel-argo.service -f"
+    echo ""
+    
+    print_info "配置文件位置:"
+    echo "  Xray配置: $CONFIG_DIR/xray.json"
+    echo "  隧道配置: $CONFIG_DIR/config.yaml"
+    echo "  连接信息: $CONFIG_DIR/tunnel.conf"
+    echo ""
+    
+    print_warning "重要提示:"
+    print_warning "1. 请等待几分钟让DNS生效"
+    print_warning "2. 在Cloudflare DNS中确认 $DOMAIN 已正确解析"
+    print_warning "3. 首次连接可能需要等待证书签发"
 }
 
 # ----------------------------
 # 主安装流程
 # ----------------------------
 main_install() {
-    print_info "开始交互式安装..."
+    print_info "开始安装流程..."
     
     # 收集用户信息
     collect_user_info
     
     # 执行安装步骤
     check_system
-    setup_user_and_dirs
     install_components
-    configure_cloudflare_tunnel
+    manual_cloudflare_auth
+    setup_tunnel
     configure_xray
     configure_services
     start_services
-    generate_client_config
+    show_connection_info
     
     echo ""
     print_success "🎉 安装全部完成！"
-    print_info "请使用上面的配置信息设置您的客户端。"
+    print_info "请使用上面的VLESS链接配置您的客户端。"
 }
 
 # ----------------------------
@@ -474,8 +472,8 @@ main() {
     clear
     echo ""
     echo "╔══════════════════════════════════════════════╗"
-    echo "║    Cloudflare Tunnel 交互式安装脚本          ║"
-    echo "║                版本 3.0                      ║"
+    echo "║    Cloudflare Tunnel 一键安装脚本            ║"
+    echo "║                版本 4.0 (Root版)             ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
     
@@ -485,6 +483,10 @@ main() {
             ;;
         "status")
             systemctl status secure-tunnel-xray.service secure-tunnel-argo.service --no-pager
+            ;;
+        "restart")
+            systemctl restart secure-tunnel-xray.service secure-tunnel-argo.service
+            print_success "服务已重启"
             ;;
         "uninstall")
             print_warning "正在卸载..."
@@ -497,18 +499,20 @@ main() {
             print_success "卸载完成"
             ;;
         "config")
-            if [[ -f "$CONFIG_DIR/client-config.txt" ]]; then
-                cat "$CONFIG_DIR/client-config.txt"
+            if [[ -f "$CONFIG_DIR/tunnel.conf" ]]; then
+                print_info "当前配置:"
+                cat "$CONFIG_DIR/tunnel.conf"
             else
-                print_error "未找到配置文件，请先运行安装"
+                print_error "未找到配置文件"
             fi
             ;;
         *)
             echo "使用方法:"
-            echo "  sudo $0 install    # 交互式安装"
-            echo "  sudo $0 status     # 查看服务状态"
-            echo "  sudo $0 config     # 查看客户端配置"
-            echo "  sudo $0 uninstall  # 卸载所有组件"
+            echo "  sudo $0 install    # 安装"
+            echo "  sudo $0 status     # 查看状态"
+            echo "  sudo $0 restart    # 重启服务"
+            echo "  sudo $0 config     # 查看配置"
+            echo "  sudo $0 uninstall  # 卸载"
             exit 1
             ;;
     esac
