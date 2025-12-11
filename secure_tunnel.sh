@@ -548,661 +548,6 @@ start_services() {
 }
 
 # ----------------------------
-# 生成订阅链接（增强版）
-# ----------------------------
-generate_subscription() {
-    print_info "生成订阅链接..."
-    
-    # 读取配置
-    if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
-        print_error "未找到配置文件"
-        return
-    fi
-    
-    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    
-    if [[ -z "$domain" ]] || [[ -z "$uuid" ]]; then
-        print_error "无法读取配置信息"
-        return
-    fi
-    
-    # 创建订阅配置目录
-    local SUB_DIR="$CONFIG_DIR/subscription"
-    mkdir -p "$SUB_DIR"
-    
-    # 1. 生成通用VLESS链接
-    local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道-TLS"
-    local vless_non_tls="vless://${uuid}@${domain}:80?encryption=none&security=none&type=ws&host=${domain}&path=%2F${uuid}#安全隧道-非TLS"
-    
-    # 2. 生成VMESS链接
-    local vmess_config=$(cat << EOF
-{
-  "v": "2",
-  "ps": "安全隧道-VMESS",
-  "add": "${domain}",
-  "port": "443",
-  "id": "${uuid}",
-  "aid": "0",
-  "scy": "none",
-  "net": "ws",
-  "type": "none",
-  "host": "${domain}",
-  "path": "/${uuid}",
-  "tls": "tls",
-  "sni": "${domain}",
-  "alpn": ""
-}
-EOF
-    )
-    local vmess_tls=$(echo -n "$vmess_config" | base64 -w 0)
-    local vmess_tls_url="vmess://${vmess_tls}"
-    
-    # 3. 生成Trojan链接
-    local trojan_tls="trojan://${uuid}@${domain}:443?security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道-Trojan"
-    
-    # 4. 生成Clash配置（增强版）
-    local clash_config=$(cat << EOF
-proxies:
-  - name: "安全隧道-TLS"
-    type: vless
-    server: ${domain}
-    port: 443
-    uuid: ${uuid}
-    network: ws
-    tls: true
-    udp: true
-    servername: ${domain}
-    ws-opts:
-      path: /${uuid}
-      headers:
-        Host: ${domain}
-  - name: "安全隧道-非TLS"
-    type: vless
-    server: ${domain}
-    port: 80
-    uuid: ${uuid}
-    network: ws
-    tls: false
-    udp: true
-    ws-opts:
-      path: /${uuid}
-      headers:
-        Host: ${domain}
-  - name: "安全隧道-VMESS"
-    type: vmess
-    server: ${domain}
-    port: 443
-    uuid: ${uuid}
-    alterId: 0
-    cipher: none
-    network: ws
-    tls: true
-    servername: ${domain}
-    ws-opts:
-      path: /${uuid}
-      headers:
-        Host: ${domain}
-  - name: "安全隧道-Trojan"
-    type: trojan
-    server: ${domain}
-    port: 443
-    password: ${uuid}
-    network: ws
-    tls: true
-    sni: ${domain}
-    ws-opts:
-      path: /${uuid}
-      headers:
-        Host: ${domain}
-
-proxy-groups:
-  - name: 🚀 节点选择
-    type: select
-    proxies:
-      - "安全隧道-TLS"
-      - "安全隧道-非TLS"
-      - "安全隧道-VMESS"
-      - "安全隧道-Trojan"
-  - name: 🌍 国外网站
-    type: select
-    proxies:
-      - 🚀 节点选择
-      - DIRECT
-  - name: 🎯 国内直连
-    type: select
-    proxies:
-      - DIRECT
-
-rules:
-  - DOMAIN-SUFFIX,openai.com,🚀 节点选择
-  - DOMAIN-SUFFIX,google.com,🚀 节点选择
-  - DOMAIN-SUFFIX,youtube.com,🚀 节点选择
-  - DOMAIN-SUFFIX,twitter.com,🚀 节点选择
-  - DOMAIN-SUFFIX,facebook.com,🚀 节点选择
-  - DOMAIN-SUFFIX,github.com,🚀 节点选择
-  - DOMAIN-SUFFIX,netflix.com,🚀 节点选择
-  - DOMAIN-KEYWORD,spotify,🚀 节点选择
-  - DOMAIN-KEYWORD,telegram,🚀 节点选择
-  - DOMAIN-KEYWORD,discord,🚀 节点选择
-  - GEOIP,CN,🎯 国内直连
-  - MATCH,🚀 节点选择
-EOF
-    )
-    
-    # 5. 生成Quantumult X配置
-    local quantumult_config=$(cat << EOF
-[vless]
-安全隧道-TLS = vless, ${domain}, 443, ${uuid}, ws-path=/${uuid}, ws-host=${domain}, tls=true, tls-host=${domain}, over-tls=true, certificate=1, group=安全隧道
-安全隧道-非TLS = vless, ${domain}, 80, ${uuid}, ws-path=/${uuid}, ws-host=${domain}, tls=false, group=安全隧道
-
-[vmess]
-安全隧道-VMESS = vmess, ${domain}, 443, ${uuid}, ws-path=/${uuid}, ws-host=${domain}, tls=true, tls-host=${domain}, over-tls=true, certificate=1, group=安全隧道
-
-[trojan]
-安全隧道-Trojan = trojan, ${domain}, 443, ${uuid}, ws-path=/${uuid}, ws-host=${domain}, tls=true, tls-host=${domain}, over-tls=true, certificate=1, group=安全隧道
-
-[filter_local]
-# 本地规则
-DOMAIN-SUFFIX,cn,DIRECT
-GEOIP,CN,DIRECT
-FINAL,安全隧道
-EOF
-    )
-    
-    # 6. 生成Shadowrocket/小火箭配置
-    local shadowrocket_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&path=/${uuid}&host=${domain}&tlsHost=${domain}#安全隧道"
-    local shadowrocket_non_tls="vless://${uuid}@${domain}:80?encryption=none&security=none&type=ws&path=/${uuid}&host=${domain}#安全隧道-非TLS"
-    
-    # 7. 生成Sing-box配置
-    local singbox_config=$(cat << EOF
-{
-  "outbounds": [
-    {
-      "type": "vless",
-      "tag": "安全隧道-TLS",
-      "server": "${domain}",
-      "server_port": 443,
-      "uuid": "${uuid}",
-      "network": "ws",
-      "tls": {
-        "enabled": true,
-        "server_name": "${domain}",
-        "utls": {
-          "enabled": true,
-          "fingerprint": "chrome"
-        }
-      },
-      "transport": {
-        "type": "ws",
-        "path": "/${uuid}",
-        "headers": {
-          "Host": "${domain}"
-        }
-      }
-    },
-    {
-      "type": "vless",
-      "tag": "安全隧道-非TLS",
-      "server": "${domain}",
-      "server_port": 80,
-      "uuid": "${uuid}",
-      "network": "ws",
-      "transport": {
-        "type": "ws",
-        "path": "/${uuid}",
-        "headers": {
-          "Host": "${domain}"
-        }
-      }
-    }
-  ],
-  "route": {
-    "rules": [
-      {
-        "geosite": ["cn"],
-        "outbound": "direct"
-      },
-      {
-        "domain": ["openai.com", "google.com"],
-        "outbound": "安全隧道-TLS"
-      }
-    ],
-    "final": "安全隧道-TLS"
-  }
-}
-EOF
-    )
-    
-    # 保存各种格式的配置文件
-    echo "$vless_tls" > "$SUB_DIR/vless_tls.txt"
-    echo "$vless_non_tls" > "$SUB_DIR/vless_non_tls.txt"
-    echo "$vmess_tls_url" > "$SUB_DIR/vmess.txt"
-    echo "$trojan_tls" > "$SUB_DIR/trojan.txt"
-    echo "$clash_config" > "$SUB_DIR/clash.yaml"
-    echo "$quantumult_config" > "$SUB_DIR/quantumult.conf"
-    echo -e "$shadowrocket_tls\n$shadowrocket_non_tls" > "$SUB_DIR/shadowrocket.conf"
-    echo "$singbox_config" > "$SUB_DIR/singbox.json"
-    
-    # 8. 生成Base64编码的订阅链接
-    local combined_links=$(cat << EOF
-vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道-TLS
-vless://${uuid}@${domain}:80?encryption=none&security=none&type=ws&host=${domain}&path=%2F${uuid}#安全隧道-非TLS
-vmess://${vmess_tls}
-trojan://${uuid}@${domain}:443?security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道-Trojan
-EOF
-    )
-    
-    local base64_sub=$(echo "$combined_links" | base64 -w 0)
-    
-    # 9. 生成Clash订阅链接
-    local base64_clash=$(echo "$clash_config" | base64 -w 0)
-    
-    # 10. 保存订阅链接到文件
-    cat > "$SUB_DIR/subscription.txt" << EOF
-# 安全隧道订阅链接
-# 生成时间: $(date "+%Y-%m-%d %H:%M:%S")
-# 域名: $domain
-# UUID: $uuid
-
-## 1. 通用Base64订阅
-$base64_sub
-
-## 2. Clash订阅
-$base64_clash
-
-## 3. 原始链接
-TLS链接: $vless_tls
-非TLS链接: $vless_non_tls
-VMESS链接: $vmess_tls_url
-Trojan链接: $trojan_tls
-
-## 4. 配置文件位置
-Clash配置: $SUB_DIR/clash.yaml
-Quantumult配置: $SUB_DIR/quantumult.conf
-Shadowrocket配置: $SUB_DIR/shadowrocket.conf
-Sing-box配置: $SUB_DIR/singbox.json
-V2rayN/NekoBox订阅: $SUB_DIR/vless_tls.txt
-
-## 5. 订阅服务器
-本地订阅: http://YOUR_SERVER_IP:8080/sub
-Clash订阅: http://YOUR_SERVER_IP:8080/clash.yaml
-EOF
-    
-    # 11. 生成二维码文本
-    cat > "$SUB_DIR/qr.txt" << EOF
-安全隧道订阅二维码
-
-请使用以下客户端扫描二维码：
-1. V2rayN / NekoBox: 扫描通用订阅二维码
-2. Clash: 扫描Clash订阅二维码
-3. Shadowrocket: 直接导入链接
-
-通用订阅链接：$vless_tls
-Clash订阅链接：clash://install-config?url=http://YOUR_SERVER_IP:8080/clash.yaml
-
-二维码生成时间：$(date "+%Y-%m-%d %H:%M:%S")
-EOF
-    
-    print_success "订阅链接生成完成！"
-}
-
-# ----------------------------
-# 显示订阅信息（增强版）
-# ----------------------------
-show_subscription() {
-    print_info "═══════════════════════════════════════════════"
-    print_info "           订阅链接信息"
-    print_info "═══════════════════════════════════════════════"
-    echo ""
-    
-    local SUB_DIR="$CONFIG_DIR/subscription"
-    
-    if [[ ! -d "$SUB_DIR" ]]; then
-        print_info "未找到订阅目录，正在生成..."
-        generate_subscription
-    fi
-    
-    # 读取配置文件
-    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2 2>/dev/null)
-    local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2 2>/dev/null)
-    
-    if [[ -z "$domain" ]] || [[ -z "$uuid" ]]; then
-        print_error "无法读取配置信息"
-        return
-    fi
-    
-    # 获取服务器IP
-    local server_ip=$(hostname -I | awk '{print $1}' | head -1)
-    [ -z "$server_ip" ] && server_ip="YOUR_SERVER_IP"
-    
-    # 显示各种订阅格式
-    print_success "📡 通用订阅链接:"
-    echo ""
-    echo "https://subscribe.example.com/subscribe?url=$(echo -e "vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道-TLS\nvless://${uuid}@${domain}:80?encryption=none&security=none&type=ws&host=${domain}&path=%2F${uuid}#安全隧道-非TLS" | base64 -w 0 | tr -d '\n')"
-    echo ""
-    
-    print_success "🌐 本地订阅服务器:"
-    echo ""
-    echo "通用订阅: http://${server_ip}:8080/sub"
-    echo "Clash配置: http://${server_ip}:8080/clash.yaml"
-    echo "Quantumult配置: http://${server_ip}:8080/quantumult.conf"
-    echo "Shadowrocket配置: http://${server_ip}:8080/shadowrocket.conf"
-    echo ""
-    
-    print_success "🎯 客户端专用链接:"
-    echo ""
-    echo "Clash: clash://install-config?url=http://${server_ip}:8080/clash.yaml"
-    echo "Shadowrocket: 导入 http://${server_ip}:8080/shadowrocket.conf"
-    echo "Quantumult X: 导入 http://${server_ip}:8080/quantumult.conf"
-    echo "V2rayN/NekoBox: 导入通用订阅链接"
-    echo ""
-    
-    print_success "🔗 原始配置链接:"
-    echo ""
-    echo "VLESS TLS:"
-    echo "vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道"
-    echo ""
-    echo "VLESS 非TLS:"
-    echo "vless://${uuid}@${domain}:80?encryption=none&security=none&type=ws&host=${domain}&path=%2F${uuid}#安全隧道-非TLS"
-    echo ""
-    
-    print_info "📁 配置文件位置:"
-    echo "  订阅目录: $SUB_DIR"
-    echo "  Clash配置: $SUB_DIR/clash.yaml"
-    echo "  Quantumult配置: $SUB_DIR/quantumult.conf"
-    echo "  Shadowrocket配置: $SUB_DIR/shadowrocket.conf"
-    echo "  Sing-box配置: $SUB_DIR/singbox.json"
-    echo ""
-    
-    print_warning "💡 使用提示:"
-    echo "  1. 启动订阅服务器: sudo $0 start-server"
-    echo "  2. 然后通过 http://${server_ip}:8080/ 访问订阅"
-    echo "  3. 支持 Clash、V2rayN、NekoBox、Shadowrocket、Quantumult X 等客户端"
-    echo "  4. 建议使用 TLS 链接以获得更好的安全性"
-    echo "  5. 非TLS链接用于特殊情况（如CDN不支持TLS）"
-}
-
-# ----------------------------
-# 启动本地订阅服务器（增强版）
-# ----------------------------
-start_subscription_server() {
-    print_info "启动本地订阅服务器..."
-    
-    local SUB_DIR="$CONFIG_DIR/subscription"
-    if [[ ! -d "$SUB_DIR" ]]; then
-        generate_subscription
-    fi
-    
-    # 检查是否已安装Python
-    if ! command -v python3 &> /dev/null; then
-        print_info "安装Python3..."
-        apt-get update && apt-get install -y python3
-    fi
-    
-    # 创建增强的HTTP服务器脚本
-    cat > "$SUB_DIR/server.py" << 'PYTHON_EOF'
-#!/usr/bin/env python3
-import http.server
-import socketserver
-import os
-import base64
-import time
-import json
-
-PORT = 8080
-SUB_DIR = os.path.dirname(os.path.abspath(__file__))
-
-class SubscriptionHandler(http.server.SimpleHTTPRequestHandler):
-    def do_GET(self):
-        # 通用订阅
-        if self.path == '/sub':
-            try:
-                vless_file = os.path.join(SUB_DIR, 'vless_tls.txt')
-                vless_non_tls_file = os.path.join(SUB_DIR, 'vless_non_tls.txt')
-                vmess_file = os.path.join(SUB_DIR, 'vmess.txt')
-                trojan_file = os.path.join(SUB_DIR, 'trojan.txt')
-                
-                combined = ""
-                if os.path.exists(vless_file):
-                    with open(vless_file, 'r') as f:
-                        combined += f.read().strip() + "\n"
-                if os.path.exists(vless_non_tls_file):
-                    with open(vless_non_tls_file, 'r') as f:
-                        combined += f.read().strip() + "\n"
-                if os.path.exists(vmess_file):
-                    with open(vmess_file, 'r') as f:
-                        combined += f.read().strip() + "\n"
-                if os.path.exists(trojan_file):
-                    with open(trojan_file, 'r') as f:
-                        combined += f.read().strip() + "\n"
-                
-                if combined:
-                    encoded = base64.b64encode(combined.encode()).decode()
-                    self.send_response(200)
-                    self.send_header('Content-type', 'text/plain; charset=utf-8')
-                    self.send_header('Subscription-Userinfo', 'upload=0; download=0; total=10737418240000000; expire=2546246231')
-                    self.send_header('Content-Disposition', 'attachment; filename="subscription.txt"')
-                    self.end_headers()
-                    self.wfile.write(encoded.encode())
-                    return
-            except Exception as e:
-                print(f"Error generating subscription: {e}")
-        
-        # Clash配置
-        elif self.path == '/clash.yaml':
-            clash_file = os.path.join(SUB_DIR, 'clash.yaml')
-            if os.path.exists(clash_file):
-                self.send_response(200)
-                self.send_header('Content-type', 'text/yaml; charset=utf-8')
-                self.send_header('Content-Disposition', 'attachment; filename="clash.yaml"')
-                self.end_headers()
-                with open(clash_file, 'rb') as f:
-                    self.wfile.write(f.read())
-                return
-        
-        # Quantumult配置
-        elif self.path == '/quantumult.conf':
-            quantumult_file = os.path.join(SUB_DIR, 'quantumult.conf')
-            if os.path.exists(quantumult_file):
-                self.send_response(200)
-                self.send_header('Content-type', 'text/plain; charset=utf-8')
-                self.send_header('Content-Disposition', 'attachment; filename="quantumult.conf"')
-                self.end_headers()
-                with open(quantumult_file, 'rb') as f:
-                    self.wfile.write(f.read())
-                return
-        
-        # Shadowrocket配置
-        elif self.path == '/shadowrocket.conf':
-            shadowrocket_file = os.path.join(SUB_DIR, 'shadowrocket.conf')
-            if os.path.exists(shadowrocket_file):
-                self.send_response(200)
-                self.send_header('Content-type', 'text/plain; charset=utf-8')
-                self.send_header('Content-Disposition', 'attachment; filename="shadowrocket.conf"')
-                self.end_headers()
-                with open(shadowrocket_file, 'rb') as f:
-                    self.wfile.write(f.read())
-                return
-        
-        # Sing-box配置
-        elif self.path == '/singbox.json':
-            singbox_file = os.path.join(SUB_DIR, 'singbox.json')
-            if os.path.exists(singbox_file):
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json; charset=utf-8')
-                self.send_header('Content-Disposition', 'attachment; filename="singbox.json"')
-                self.end_headers()
-                with open(singbox_file, 'rb') as f:
-                    self.wfile.write(f.read())
-                return
-        
-        # 首页显示
-        elif self.path == '/':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/html; charset=utf-8')
-            self.end_headers()
-            html_content = """
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>安全隧道订阅服务器</title>
-                <meta charset="utf-8">
-                <style>
-                    body { font-family: Arial, sans-serif; margin: 40px; }
-                    .container { max-width: 800px; margin: 0 auto; }
-                    h1 { color: #333; }
-                    .link-box { background: #f5f5f5; padding: 15px; margin: 10px 0; border-radius: 5px; }
-                    code { background: #eee; padding: 2px 5px; border-radius: 3px; }
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <h1>安全隧道订阅服务器</h1>
-                    <p>请选择适合您客户端的订阅格式：</p>
-                    
-                    <div class="link-box">
-                        <h3>📡 通用订阅 (V2rayN/NekoBox)</h3>
-                        <p><a href="/sub">点击下载通用订阅文件</a></p>
-                        <p>或使用链接: <code>/sub</code></p>
-                    </div>
-                    
-                    <div class="link-box">
-                        <h3>🎯 Clash 配置</h3>
-                        <p><a href="/clash.yaml">点击下载Clash配置文件</a></p>
-                        <p>或使用链接: <code>/clash.yaml</code></p>
-                    </div>
-                    
-                    <div class="link-box">
-                        <h3>📱 Shadowrocket 配置</h3>
-                        <p><a href="/shadowrocket.conf">点击下载Shadowrocket配置文件</a></p>
-                        <p>或使用链接: <code>/shadowrocket.conf</code></p>
-                    </div>
-                    
-                    <div class="link-box">
-                        <h3>⚡ Quantumult X 配置</h3>
-                        <p><a href="/quantumult.conf">点击下载Quantumult X配置文件</a></p>
-                        <p>或使用链接: <code>/quantumult.conf</code></p>
-                    </div>
-                    
-                    <div class="link-box">
-                        <h3>🚀 Sing-box 配置</h3>
-                        <p><a href="/singbox.json">点击下载Sing-box配置文件</a></p>
-                        <p>或使用链接: <code>/singbox.json</code></p>
-                    </div>
-                    
-                    <div style="margin-top: 30px; color: #666;">
-                        <p><strong>使用方法：</strong></p>
-                        <ol>
-                            <li>根据您的客户端选择相应的链接</li>
-                            <li>在客户端中导入订阅链接或配置文件</li>
-                            <li>如果客户端要求，可能需要复制链接地址</li>
-                            <li>Clash用户可以直接使用：<code>clash://install-config?url=http://YOUR_IP:8080/clash.yaml</code></li>
-                        </ol>
-                    </div>
-                </div>
-            </body>
-            </html>
-            """
-            self.wfile.write(html_content.encode())
-            return
-        
-        # 默认文件服务
-        self.directory = SUB_DIR
-        return super().do_GET()
-    
-    def log_message(self, format, *args):
-        client_ip = self.client_address[0]
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {client_ip} - {args[0]} {args[1]} {args[2]}")
-
-if __name__ == '__main__':
-    os.chdir(SUB_DIR)
-    with socketserver.TCPServer(("", PORT), SubscriptionHandler) as httpd:
-        print(f"订阅服务器运行在: http://0.0.0.0:{PORT}")
-        print("=" * 50)
-        print("可用链接:")
-        print(f"  首页: http://0.0.0.0:{PORT}/")
-        print(f"  通用订阅: http://0.0.0.0:{PORT}/sub")
-        print(f"  Clash配置: http://0.0.0.0:{PORT}/clash.yaml")
-        print(f"  Shadowrocket配置: http://0.0.0.0:{PORT}/shadowrocket.conf")
-        print(f"  Quantumult配置: http://0.0.0.0:{PORT}/quantumult.conf")
-        print(f"  Sing-box配置: http://0.0.0.0:{PORT}/singbox.json")
-        print("=" * 50)
-        print("\n客户端快速导入:")
-        print(f"  Clash: clash://install-config?url=http://YOUR_IP:{PORT}/clash.yaml")
-        print(f"  其他: 在客户端中粘贴 http://YOUR_IP:{PORT}/sub")
-        print("\n按 Ctrl+C 停止服务器")
-        httpd.serve_forever()
-PYTHON_EOF
-    
-    chmod +x "$SUB_DIR/server.py"
-    
-    # 检查端口是否被占用
-    if ss -tulpn | grep ":8080" >/dev/null; then
-        print_warning "端口 8080 已被占用，尝试停止现有服务..."
-        pkill -f "server.py" 2>/dev/null || true
-        sleep 2
-    fi
-    
-    # 启动服务器（后台运行）
-    cd "$SUB_DIR"
-    nohup python3 server.py > "$SUB_DIR/server.log" 2>&1 &
-    
-    local server_pid=$!
-    echo "$server_pid" > "$SUB_DIR/server.pid"
-    
-    sleep 2
-    
-    # 获取服务器IP
-    local server_ip=$(hostname -I | awk '{print $1}' | head -1)
-    if [ -z "$server_ip" ]; then
-        server_ip="0.0.0.0"
-        print_warning "无法获取服务器IP，请手动替换 YOUR_IP"
-    fi
-    
-    print_success "✅ 订阅服务器已启动！"
-    echo ""
-    print_info "🌐 服务器地址: http://${server_ip}:8080"
-    print_info "📡 通用订阅: http://${server_ip}:8080/sub"
-    print_info "🎯 Clash订阅: http://${server_ip}:8080/clash.yaml"
-    print_info "📱 Shadowrocket: http://${server_ip}:8080/shadowrocket.conf"
-    echo ""
-    print_info "⚡ 快速导入链接:"
-    echo "  Clash: clash://install-config?url=http://${server_ip}:8080/clash.yaml"
-    echo "  V2rayN/NekoBox: 导入 http://${server_ip}:8080/sub"
-    echo ""
-    print_info "📋 管理命令:"
-    echo "  查看日志: tail -f $SUB_DIR/server.log"
-    echo "  停止服务器: sudo $0 stop-server"
-    echo "  服务器状态: sudo $0 server-status"
-    echo "  服务器PID: $server_pid"
-}
-
-# ----------------------------
-# 停止本地订阅服务器
-# ----------------------------
-stop_subscription_server() {
-    local SUB_DIR="$CONFIG_DIR/subscription"
-    local pid_file="$SUB_DIR/server.pid"
-    
-    if [[ -f "$pid_file" ]]; then
-        local pid=$(cat "$pid_file")
-        if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid"
-            print_success "✅ 订阅服务器已停止 (PID: $pid)"
-        else
-            print_warning "⚠️ 服务器进程不存在"
-        fi
-        rm -f "$pid_file"
-    else
-        print_warning "⚠️ 未找到服务器PID文件"
-    fi
-    
-    # 确保没有残留的Python服务器进程
-    pkill -f "server.py" 2>/dev/null && print_info "清理残留进程..."
-}
-
-# ----------------------------
 # 显示连接信息（包含订阅）
 # ----------------------------
 show_connection_info() {
@@ -1260,18 +605,55 @@ show_connection_info() {
     print_info "═══════════════════════════════════════════════"
     echo ""
     
-    # 生成订阅
-    generate_subscription
+    # 生成订阅目录
+    local SUB_DIR="$CONFIG_DIR/subscription"
+    mkdir -p "$SUB_DIR"
     
-    # 显示订阅信息
-    show_subscription
+    # 生成简单的订阅链接
+    local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道"
+    local vless_non_tls="vless://${uuid}@${domain}:80?encryption=none&security=none&type=ws&host=${domain}&path=%2F${uuid}#安全隧道-非TLS"
     
+    # 保存到文件
+    echo "$vless_tls" > "$SUB_DIR/vless_tls.txt"
+    echo "$vless_non_tls" > "$SUB_DIR/vless_non_tls.txt"
+    
+    # 生成base64订阅
+    local combined_links="${vless_tls}\n${vless_non_tls}"
+    local base64_sub=$(echo -e "$combined_links" | base64 -w 0)
+    echo "$base64_sub" > "$SUB_DIR/base64.txt"
+    
+    print_success "📡 订阅链接已生成:"
     echo ""
+    echo "通用订阅 (V2rayN/NekoBox):"
+    echo "$base64_sub"
+    echo ""
+    echo "原始链接:"
+    echo "TLS: $vless_tls"
+    echo "非TLS: $vless_non_tls"
+    echo ""
+    
+    # 获取服务器IP
+    local server_ip=$(hostname -I | awk '{print $1}' | head -1)
+    
+    print_info "🌐 快速使用方法:"
+    echo ""
+    if [[ -n "$server_ip" ]]; then
+        echo "1. 启动订阅服务器:"
+        echo "   sudo ./secure_tunnel.sh start-server"
+        echo ""
+        echo "2. 然后访问:"
+        echo "   http://${server_ip}:8080/sub"
+        echo "  或直接使用上面的base64订阅链接"
+    else
+        echo "1. 复制上面的base64订阅链接"
+        echo "2. 在V2rayN/NekoBox客户端中导入"
+    fi
+    echo ""
+    
     print_info "🔧 服务管理命令:"
     echo "  启动: systemctl start secure-tunnel-{xray,argo}"
     echo "  停止: systemctl stop secure-tunnel-{xray,argo}"
     echo "  状态: systemctl status secure-tunnel-{xray,argo}"
-    echo "  重启: systemctl restart secure-tunnel-{xray,argo}"
     echo "  日志: journalctl -u secure-tunnel-argo.service -f"
     echo ""
     
@@ -1279,7 +661,6 @@ show_connection_info() {
     echo "  Xray配置: $CONFIG_DIR/xray.json"
     echo "  隧道配置: $CONFIG_DIR/config.yaml"
     echo "  连接信息: $CONFIG_DIR/tunnel.conf"
-    echo "  证书位置: /root/.cloudflared/cert.pem"
     echo "  订阅目录: $CONFIG_DIR/subscription/"
     echo ""
     
@@ -1287,59 +668,170 @@ show_connection_info() {
     print_warning "1. 请等待几分钟让DNS生效"
     print_warning "2. 在Cloudflare DNS中确认 $domain 已正确解析"
     print_warning "3. 首次连接可能需要等待证书签发"
-    print_warning "4. 检查防火墙是否开放端口"
-    print_warning "5. 使用 'sudo $0 start-server' 启动订阅服务器"
 }
 
 # ----------------------------
-# 显示状态
+# 启动本地订阅服务器
 # ----------------------------
-show_status() {
-    print_info "系统服务状态:"
-    systemctl status secure-tunnel-xray.service secure-tunnel-argo.service --no-pager
+start_subscription_server() {
+    print_info "启动本地订阅服务器..."
     
-    echo ""
-    print_info "隧道状态:"
-    "$BIN_DIR/cloudflared" tunnel list || true
-    
-    echo ""
-    print_info "证书状态:"
-    if [[ -f "/root/.cloudflared/cert.pem" ]]; then
-        print_success "✅ 证书存在"
-        ls -lh "/root/.cloudflared/cert.pem"
-    else
-        print_error "❌ 证书不存在"
+    local SUB_DIR="$CONFIG_DIR/subscription"
+    if [[ ! -d "$SUB_DIR" ]]; then
+        print_info "创建订阅目录..."
+        mkdir -p "$SUB_DIR"
+        
+        # 读取配置生成订阅
+        if [[ -f "$CONFIG_DIR/tunnel.conf" ]]; then
+            local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+            local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+            
+            if [[ -n "$domain" && -n "$uuid" ]]; then
+                local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道"
+                local vless_non_tls="vless://${uuid}@${domain}:80?encryption=none&security=none&type=ws&host=${domain}&path=%2F${uuid}#安全隧道-非TLS"
+                
+                echo "$vless_tls" > "$SUB_DIR/vless_tls.txt"
+                echo "$vless_non_tls" > "$SUB_DIR/vless_non_tls.txt"
+                
+                local combined_links="${vless_tls}\n${vless_non_tls}"
+                local base64_sub=$(echo -e "$combined_links" | base64 -w 0)
+                echo "$base64_sub" > "$SUB_DIR/base64.txt"
+            fi
+        fi
     fi
     
-    echo ""
-    print_info "配置文件状态:"
-    if [[ -f "$CONFIG_DIR/tunnel.conf" ]]; then
-        print_success "✅ 配置文件存在"
-        echo "配置摘要:"
-        grep -E "^(TUNNEL_ID|DOMAIN|UUID)=" "$CONFIG_DIR/tunnel.conf"
-    else
-        print_error "❌ 配置文件不存在"
+    # 检查是否已安装Python
+    if ! command -v python3 &> /dev/null; then
+        print_info "安装Python3..."
+        apt-get update && apt-get install -y python3
     fi
     
+    # 创建简单的HTTP服务器脚本
+    cat > "$SUB_DIR/server.py" << 'PYTHON_EOF'
+#!/usr/bin/env python3
+import http.server
+import socketserver
+import os
+import base64
+import time
+
+PORT = 8080
+SUB_DIR = os.path.dirname(os.path.abspath(__file__))
+
+class SubscriptionHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/sub':
+            # 通用订阅
+            base64_file = os.path.join(SUB_DIR, 'base64.txt')
+            if os.path.exists(base64_file):
+                with open(base64_file, 'r') as f:
+                    encoded = f.read().strip()
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain; charset=utf-8')
+                self.send_header('Subscription-Userinfo', 'upload=0; download=0; total=10737418240000000; expire=2546246231')
+                self.end_headers()
+                self.wfile.write(encoded.encode())
+                return
+        
+        elif self.path == '/vless':
+            # VLESS链接
+            vless_file = os.path.join(SUB_DIR, 'vless_tls.txt')
+            if os.path.exists(vless_file):
+                with open(vless_file, 'r') as f:
+                    content = f.read().strip()
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(content.encode())
+                return
+        
+        # 默认显示文件列表
+        self.directory = SUB_DIR
+        return super().do_GET()
+    
+    def log_message(self, format, *args):
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {args[0]} - {args[1]}")
+
+if __name__ == '__main__':
+    os.chdir(SUB_DIR)
+    with socketserver.TCPServer(("", PORT), SubscriptionHandler) as httpd:
+        print(f"订阅服务器运行在: http://0.0.0.0:{PORT}")
+        print("可用链接:")
+        print(f"  通用订阅: http://0.0.0.0:{PORT}/sub")
+        print(f"  VLESS链接: http://0.0.0.0:{PORT}/vless")
+        print("\n按 Ctrl+C 停止服务器")
+        httpd.serve_forever()
+PYTHON_EOF
+    
+    chmod +x "$SUB_DIR/server.py"
+    
+    # 检查端口是否被占用
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    result = sock.connect_ex(('127.0.0.1', PORT))
+    sock.close()
+    
+    if result == 0:
+        print_warning "端口 8080 已被占用，尝试停止现有服务..."
+        pkill -f "server.py" 2>/dev/null || true
+        sleep 2
+    
+    # 启动服务器（后台运行）
+    cd "$SUB_DIR"
+    nohup python3 server.py > "$SUB_DIR/server.log" 2>&1 &
+    
+    local server_pid=$!
+    echo "$server_pid" > "$SUB_DIR/server.pid"
+    
+    sleep 2
+    
+    # 获取服务器IP
+    local server_ip=$(hostname -I | awk '{print $1}' | head -1)
+    if [ -z "$server_ip" ]; then
+        server_ip="0.0.0.0"
+    fi
+    
+    print_success "✅ 订阅服务器已启动！"
     echo ""
-    print_info "订阅服务器状态:"
+    print_info "🌐 服务器地址: http://${server_ip}:8080"
+    print_info "📡 订阅链接: http://${server_ip}:8080/sub"
+    print_info "🔗 VLESS链接: http://${server_ip}:8080/vless"
+    echo ""
+    print_info "📋 使用方法:"
+    echo "  1. 在V2rayN/NekoBox客户端中导入:"
+    echo "     http://${server_ip}:8080/sub"
+    echo "  2. 或者复制VLESS链接手动配置"
+    echo ""
+    print_info "🛠️  管理命令:"
+    echo "  查看日志: tail -f $SUB_DIR/server.log"
+    echo "  停止服务器: sudo ./secure_tunnel.sh stop-server"
+    echo "  服务器PID: $server_pid"
+}
+
+# ----------------------------
+# 停止本地订阅服务器
+# ----------------------------
+stop_subscription_server() {
     local SUB_DIR="$CONFIG_DIR/subscription"
     local pid_file="$SUB_DIR/server.pid"
+    
     if [[ -f "$pid_file" ]]; then
         local pid=$(cat "$pid_file")
         if kill -0 "$pid" 2>/dev/null; then
-            print_success "✅ 订阅服务器正在运行 (PID: $pid)"
-            local server_ip=$(hostname -I | awk '{print $1}' | head -1)
-            [ -z "$server_ip" ] && server_ip="YOUR_SERVER_IP"
-            echo "  访问地址: http://${server_ip}:8080"
-            echo "  订阅链接: http://${server_ip}:8080/sub"
+            kill "$pid"
+            print_success "✅ 订阅服务器已停止 (PID: $pid)"
         else
-            print_error "❌ 服务器进程已停止"
+            print_warning "⚠️ 服务器进程不存在"
         fi
+        rm -f "$pid_file"
     else
-        print_info "订阅服务器未运行"
-        echo "  启动命令: sudo $0 start-server"
+        print_warning "⚠️ 未找到服务器PID文件"
     fi
+    
+    # 确保没有残留的Python服务器进程
+    pkill -f "server.py" 2>/dev/null && print_info "清理残留进程..."
 }
 
 # ----------------------------
@@ -1363,8 +855,9 @@ main_install() {
     
     echo ""
     print_success "🎉 安装全部完成！"
-    print_info "请使用上面的VLESS链接或订阅链接配置您的客户端。"
-    print_info "启动订阅服务器命令: sudo $0 start-server"
+    echo ""
+    print_info "要启动订阅服务器，请运行:"
+    echo "  sudo ./secure_tunnel.sh start-server"
 }
 
 # ----------------------------
@@ -1383,86 +876,49 @@ main() {
     "install")
         main_install
         ;;
-    "status")
-        show_status
-        ;;
-    "restart")
-        systemctl restart secure-tunnel-xray.service secure-tunnel-argo.service
-        print_success "服务已重启"
-        ;;
-    "uninstall")
-        print_warning "正在卸载..."
-        systemctl stop secure-tunnel-xray.service secure-tunnel-argo.service 2>/dev/null || true
-        systemctl disable secure-tunnel-xray.service secure-tunnel-argo.service 2>/dev/null || true
-        rm -f /etc/systemd/system/secure-tunnel-*.service
-        systemctl daemon-reload
-        rm -rf "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" "/root/.cloudflared"
-        userdel "$SERVICE_USER" 2>/dev/null || true
-        print_success "卸载完成"
-        ;;
-    "config")
-        if [[ -f "$CONFIG_DIR/tunnel.conf" ]]; then
-            print_info "当前配置:"
-            cat "$CONFIG_DIR/tunnel.conf"
-        else
-            print_error "未找到配置文件"
-        fi
-        ;;
-    "auth")
-        print_info "重新授权..."
-        direct_cloudflare_auth
-        ;;
-    "subscription")
-        show_subscription
-        ;;
-    "gen-sub")
-        generate_subscription
-        print_success "订阅链接已重新生成"
-        ;;
     "start-server")
         start_subscription_server
         ;;
     "stop-server")
         stop_subscription_server
         ;;
-    "server-status")
-        local SUB_DIR="$CONFIG_DIR/subscription"
-        local pid_file="$SUB_DIR/server.pid"
-        if [[ -f "$pid_file" ]]; then
-            local pid=$(cat "$pid_file")
-            if kill -0 "$pid" 2>/dev/null; then
-                print_success "✅ 订阅服务器正在运行 (PID: $pid)"
-                local server_ip=$(hostname -I | awk '{print $1}' | head -1)
-                [ -z "$server_ip" ] && server_ip="YOUR_SERVER_IP"
+    "subscription")
+        # 显示订阅信息
+        if [[ -f "$CONFIG_DIR/tunnel.conf" ]]; then
+            local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+            local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+            
+            if [[ -n "$domain" && -n "$uuid" ]]; then
+                echo "=== 订阅链接信息 ==="
                 echo ""
-                print_info "🌐 服务器地址: http://${server_ip}:8080"
-                print_info "📡 订阅链接: http://${server_ip}:8080/sub"
-                print_info "🎯 Clash订阅: http://${server_ip}:8080/clash.yaml"
-                print_info "📱 Shadowrocket: http://${server_ip}:8080/shadowrocket.conf"
+                echo "域名: $domain"
+                echo "UUID: $uuid"
+                echo ""
+                echo "VLESS TLS 链接:"
+                echo "vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道"
+                echo ""
+                echo "VLESS 非TLS 链接:"
+                echo "vless://${uuid}@${domain}:80?encryption=none&security=none&type=ws&host=${domain}&path=%2F${uuid}#安全隧道-非TLS"
+                echo ""
+                echo "=== 使用方法 ==="
+                echo "1. 启动订阅服务器: sudo ./secure_tunnel.sh start-server"
+                echo "2. 然后访问显示的链接获取订阅"
             else
-                print_error "❌ 服务器进程已停止"
+                print_error "无法读取配置信息"
             fi
         else
-            print_error "❌ 订阅服务器未运行"
-            print_info "启动命令: sudo $0 start-server"
+            print_error "未找到配置文件，请先安装"
         fi
         ;;
     *)
         echo "使用方法:"
-        echo "  sudo $0 install          # 安装"
-        echo "  sudo $0 status           # 查看状态"
-        echo "  sudo $0 restart          # 重启服务"
-        echo "  sudo $0 config           # 查看配置"
-        echo "  sudo $0 auth             # 重新授权"
-        echo "  sudo $0 subscription     # 显示订阅链接"
-        echo "  sudo $0 gen-sub          # 重新生成订阅"
-        echo "  sudo $0 start-server     # 启动订阅服务器"
-        echo "  sudo $0 stop-server      # 停止订阅服务器"
-        echo "  sudo $0 server-status    # 查看服务器状态"
-        echo "  sudo $0 uninstall        # 卸载"
+        echo "  sudo ./secure_tunnel.sh install         # 安装"
+        echo "  sudo ./secure_tunnel.sh start-server    # 启动订阅服务器"
+        echo "  sudo ./secure_tunnel.sh stop-server     # 停止订阅服务器"
+        echo "  sudo ./secure_tunnel.sh subscription    # 显示订阅链接"
         exit 1
         ;;
-esac
+    esac
 }
 
 # 运行主函数
