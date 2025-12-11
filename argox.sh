@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
 # Cloudflare Tunnel + Xray 安装脚本
-# 版本: 6.0 - 修复授权 + 添加卸载功能
+# 版本: 6.1 - 彻底修复授权问题
 # ============================================
 
 set -e
@@ -45,7 +45,7 @@ show_title() {
     echo ""
     echo "╔══════════════════════════════════════════════╗"
     echo "║    Cloudflare Tunnel + Xray 管理脚本        ║"
-    echo "║             版本: 6.0                       ║"
+    echo "║             版本: 6.1                       ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
 }
@@ -205,139 +205,154 @@ install_components() {
 }
 
 # ----------------------------
-# Cloudflare 授权（修复版）
+# Cloudflare 授权（彻底修复版）
 # ----------------------------
 direct_cloudflare_auth() {
     echo ""
     print_auth "═══════════════════════════════════════════════"
-    print_auth "         Cloudflare 授权（请按提示操作）       "
+    print_auth "         Cloudflare 授权（关键步骤）          "
     print_auth "═══════════════════════════════════════════════"
+    echo ""
+    
+    print_warning "⚠️  重要：授权问题是当前最常见的问题！"
+    echo ""
+    print_info "问题现象：只有 cert.pem 没有 .json 凭证文件"
+    print_info "原因：cloudflared tunnel login 授权不完整"
     echo ""
     
     # 清理旧的授权文件
     rm -rf /root/.cloudflared 2>/dev/null
     mkdir -p /root/.cloudflared
     
-    print_auth "重要：请完成以下授权步骤"
     echo ""
-    print_info "授权流程："
-    print_info "1. 脚本将显示授权链接"
-    print_info "2. 复制链接到浏览器打开"
-    print_info "3. 登录 Cloudflare 账号"
-    print_info "4. 选择要授权的域名"
-    print_info "5. 点击 'Authorize' 按钮"
-    print_info "6. 完成授权后返回终端"
-    print_info "7. 按回车键继续"
+    print_info "解决方案：使用替代授权方法"
     echo ""
-    print_warning "必须点击 'Authorize' 按钮完成授权！"
+    print_info "我们将使用以下步骤："
+    print_info "1. 运行 cloudflared tunnel login 获取授权链接"
+    print_info "2. 手动完成浏览器授权"
+    print_info "3. 手动创建隧道获取凭证文件"
     echo ""
-    print_input "按回车键显示授权链接..."
+    print_input "按回车键开始..."
     read -r
     
+    # 步骤1：获取授权链接
     echo ""
-    print_info "正在生成授权链接..."
+    print_info "步骤1：获取授权链接"
     echo "=============================================="
     
-    # 运行授权命令 - 捕获输出
-    echo "请复制以下链接到浏览器中打开："
+    # 运行 tunnel login 获取链接
+    echo "正在获取授权链接..."
     echo ""
     
-    # 尝试获取授权链接
-    local auth_output
-    auth_output=$("$BIN_DIR/cloudflared" tunnel login 2>&1 | tee /dev/tty)
+    # 创建一个临时脚本来捕获授权链接
+    cat > /tmp/get_auth_url.sh << 'EOF'
+#!/bin/bash
+echo "请复制以下链接到浏览器打开："
+echo ""
+# 运行 cloudflared tunnel login 并尝试捕获URL
+/usr/local/bin/cloudflared tunnel login 2>&1 | grep -o "https://[^ ]*" | head -1
+if [ $? -ne 0 ]; then
+    echo "https://dash.cloudflare.com/argotunnel"
+fi
+EOF
+    
+    chmod +x /tmp/get_auth_url.sh
+    /tmp/get_auth_url.sh
     
     echo ""
     echo "=============================================="
     echo ""
     
-    # 如果上一条命令没有显示链接，手动提示
-    if ! echo "$auth_output" | grep -q "https://"; then
-        print_info "如果未看到授权链接，请手动运行："
-        print_info "  $BIN_DIR/cloudflared tunnel login"
-        echo ""
-        print_input "授权完成后按回车键继续..."
-        read -r
-    else
-        print_input "请完成浏览器授权后按回车键继续..."
-        read -r
-    fi
-    
-    # 检查授权文件
+    print_info "授权步骤："
+    print_info "1. 复制上面的链接到浏览器"
+    print_info "2. 登录 Cloudflare 账号"
+    print_info "3. 选择要授权的域名"
+    print_info "4. 点击 'Authorize' 按钮"
+    print_info "5. 等待授权完成"
     echo ""
-    print_info "检查授权文件..."
+    print_warning "必须看到授权成功的页面！"
+    print_input "完成后按回车键继续..."
+    read -r
     
-    local check_count=0
-    while [[ $check_count -lt 10 ]]; do
+    # 步骤2：检查授权文件
+    echo ""
+    print_info "步骤2：检查授权文件"
+    echo "=============================================="
+    
+    # 检查是否生成了文件
+    local auth_success=false
+    
+    for i in {1..5}; do
         echo ""
-        print_info "检查次数: $((check_count+1))"
+        print_info "检查 ($i/5)..."
         
         if [[ -f "/root/.cloudflared/cert.pem" ]]; then
             print_success "✅ 找到证书文件 (cert.pem)"
             
-            # 查找JSON凭证文件
+            # 查找JSON文件
             local json_files=()
             while IFS= read -r -d '' file; do
                 json_files+=("$file")
             done < <(find /root/.cloudflared -name "*.json" -type f -print0 2>/dev/null)
             
             if [[ ${#json_files[@]} -gt 0 ]]; then
-                print_success "✅ 找到凭证文件:"
+                print_success "✅ 找到凭证文件："
                 for file in "${json_files[@]}"; do
                     echo "  - $(basename "$file")"
+                    # 显示文件前几行
+                    echo "    内容: $(head -c 50 "$file")..."
                 done
-                return 0
+                auth_success=true
+                break
             else
                 print_warning "⚠️  有证书但无凭证文件"
-                print_info "这可能是因为授权不完整。"
-                print_info "请确保在浏览器中点击了 'Authorize' 按钮。"
+                print_info "这很常见，我们将使用替代方法..."
+                auth_success=true  # 有证书就可以继续
+                break
             fi
         else
             print_warning "⚠️  未找到证书文件"
         fi
         
-        if [[ $check_count -eq 3 ]]; then
-            echo ""
-            print_input "如果已完成授权但未检测到文件，按回车键重试检查..."
-            read -r
+        if [[ $i -lt 5 ]]; then
+            print_info "等待3秒后重试..."
+            sleep 3
         fi
-        
-        sleep 3
-        ((check_count++))
     done
     
-    echo ""
-    print_error "❌ 未检测到完整的授权文件"
-    echo ""
-    print_info "手动检查步骤："
-    echo "  1. 查看目录: ls -la /root/.cloudflared/"
-    echo "  2. 应该看到 cert.pem 和 *.json 文件"
-    echo "  3. 如果没有，重新授权: $BIN_DIR/cloudflared tunnel login"
-    echo ""
-    print_input "按回车键继续尝试，或按 Ctrl+C 退出..."
-    read -r
+    echo "=============================================="
     
-    # 让用户选择是否重新授权
-    echo ""
-    print_input "是否重新尝试授权？(y/N): "
-    read -r retry_auth
-    if [[ "$retry_auth" == "y" || "$retry_auth" == "Y" ]]; then
-        direct_cloudflare_auth
+    if [[ "$auth_success" == true ]] && [[ -f "/root/.cloudflared/cert.pem" ]]; then
+        print_success "✅ 授权检查通过"
+        return 0
     else
-        print_info "跳过授权，继续安装（可能无法正常工作）"
+        print_error "❌ 授权失败"
+        echo ""
+        print_info "手动解决方案："
+        echo "  1. 手动运行: /usr/local/bin/cloudflared tunnel login"
+        echo "  2. 完成完整的浏览器授权"
+        echo "  3. 检查文件: ls -la /root/.cloudflared/"
+        echo "  4. 应该看到 cert.pem 和 *.json 文件"
+        echo ""
+        print_input "按回车键尝试继续安装（可能失败）..."
+        read -r
+        return 1
     fi
 }
 
 # ----------------------------
-# 创建隧道和配置
+# 创建隧道和配置（支持无凭证文件）
 # ----------------------------
 setup_tunnel() {
     print_info "设置 Cloudflare Tunnel..."
     
     # 检查证书文件
     if [[ ! -f "/root/.cloudflared/cert.pem" ]]; then
-        print_error "未找到证书文件"
+        print_error "❌ 未找到证书文件，无法继续"
         return 1
     fi
+    
+    print_success "✅ 找到证书文件"
     
     # 查找凭证文件
     local json_file=""
@@ -348,14 +363,39 @@ setup_tunnel() {
     done < <(find /root/.cloudflared -name "*.json" -type f -print0 2>/dev/null)
     
     if [[ ${#json_files[@]} -eq 0 ]]; then
-        print_error "❌ 未找到凭证文件"
-        print_info "可能需要重新授权"
-        return 1
+        print_warning "⚠️  未找到凭证文件 (.json)"
+        print_info "将尝试创建隧道来生成凭证文件..."
+        
+        # 创建测试隧道来生成凭证文件
+        local test_tunnel_name="temp-tunnel-$(date +%s)"
+        print_info "创建测试隧道: $test_tunnel_name"
+        
+        if "$BIN_DIR/cloudflared" tunnel create "$test_tunnel_name" > /dev/null 2>&1; then
+            # 重新查找凭证文件
+            json_files=()
+            while IFS= read -r -d '' file; do
+                json_files+=("$file")
+            done < <(find /root/.cloudflared -name "*.json" -type f -print0 2>/dev/null)
+            
+            if [[ ${#json_files[@]} -gt 0 ]]; then
+                json_file="${json_files[0]}"
+                print_success "✅ 通过创建隧道生成了凭证文件: $(basename "$json_file")"
+                
+                # 删除测试隧道
+                "$BIN_DIR/cloudflared" tunnel delete -f "$test_tunnel_name" 2>/dev/null || true
+            else
+                print_error "❌ 创建隧道后仍未生成凭证文件"
+                return 1
+            fi
+        else
+            print_error "❌ 无法创建测试隧道"
+            return 1
+        fi
+    else
+        # 使用找到的凭证文件
+        json_file="${json_files[0]}"
+        print_success "✅ 使用凭证文件: $(basename "$json_file")"
     fi
-    
-    # 使用第一个找到的凭证文件
-    json_file="${json_files[0]}"
-    print_success "✅ 使用凭证文件: $(basename "$json_file")"
     
     if [[ -z "$USER_DOMAIN" ]]; then
         if [ "$SILENT_MODE" = true ]; then
@@ -375,7 +415,10 @@ setup_tunnel() {
     
     # 创建新隧道
     print_info "创建隧道: $TUNNEL_NAME"
-    "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME" > /dev/null 2>&1
+    if ! "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME" > /dev/null 2>&1; then
+        print_error "❌ 无法创建隧道"
+        return 1
+    fi
     
     local tunnel_id
     tunnel_id=$("$BIN_DIR/cloudflared" tunnel list 2>/dev/null | grep "$TUNNEL_NAME" | awk '{print $1}')
@@ -389,8 +432,11 @@ setup_tunnel() {
     
     # 绑定域名
     print_info "绑定域名: $USER_DOMAIN"
-    "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN" > /dev/null 2>&1
-    print_success "✅ 域名绑定成功"
+    if ! "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN" > /dev/null 2>&1; then
+        print_warning "⚠️  域名绑定可能失败，请稍后在Cloudflare控制台检查"
+    else
+        print_success "✅ 域名绑定成功"
+    fi
     
     # 等待DNS传播
     print_info "等待DNS配置生效（10秒）..."
@@ -406,7 +452,7 @@ CREDENTIALS_FILE=$json_file
 CREATED_DATE=$(date +"%Y-%m-%d")
 EOF
     
-    print_success "隧道设置完成"
+    print_success "✅ 隧道设置完成"
     return 0
 }
 
@@ -667,8 +713,13 @@ main_install() {
     
     # 授权部分
     if ! direct_cloudflare_auth; then
-        print_error "授权失败，安装中止"
-        return 1
+        print_warning "授权可能有问題，继续安装可能失败"
+        print_input "是否继续安装？(y/N): "
+        read -r continue_install
+        if [[ "$continue_install" != "y" && "$continue_install" != "Y" ]]; then
+            print_error "安装中止"
+            return 1
+        fi
     fi
     
     # 设置隧道
@@ -822,6 +873,121 @@ show_status() {
 }
 
 # ----------------------------
+# 手动修复授权
+# ----------------------------
+manual_auth_fix() {
+    echo ""
+    print_auth "═══════════════════════════════════════════════"
+    print_auth "        手动修复授权问题"
+    print_auth "═══════════════════════════════════════════════"
+    echo ""
+    
+    print_info "当前问题：cloudflared tunnel login 不生成凭证文件"
+    echo ""
+    print_info "解决方案："
+    print_info "1. 手动运行授权命令"
+    print_info "2. 使用替代方法获取凭证"
+    echo ""
+    
+    echo "请选择修复方法："
+    echo ""
+    echo "  1) 重新运行 cloudflared tunnel login"
+    echo "  2) 使用 tunnel create 生成凭证"
+    echo "  3) 检查当前授权状态"
+    echo "  4) 返回主菜单"
+    echo ""
+    
+    print_input "请输入选项 (1-4): "
+    read -r fix_choice
+    
+    case "$fix_choice" in
+        1)
+            echo ""
+            print_info "方法1：重新授权"
+            echo "=============================================="
+            rm -rf /root/.cloudflared 2>/dev/null
+            mkdir -p /root/.cloudflared
+            
+            echo "请复制以下链接到浏览器："
+            /usr/local/bin/cloudflared tunnel login 2>&1 | grep -o "https://[^ ]*" | head -1 || echo "https://dash.cloudflare.com/argotunnel"
+            
+            echo ""
+            echo "=============================================="
+            echo ""
+            print_info "完成后检查文件："
+            echo "  ls -la /root/.cloudflared/"
+            echo "  应该看到 cert.pem 和 *.json 文件"
+            echo ""
+            print_input "按回车键继续..."
+            read -r
+            ;;
+        2)
+            echo ""
+            print_info "方法2：创建隧道生成凭证"
+            echo "=============================================="
+            
+            # 确保有证书文件
+            if [[ ! -f "/root/.cloudflared/cert.pem" ]]; then
+                print_error "未找到证书文件，请先运行方法1"
+                return
+            fi
+            
+            print_info "创建测试隧道来生成凭证..."
+            local test_name="fix-tunnel-$(date +%s)"
+            /usr/local/bin/cloudflared tunnel create "$test_name"
+            
+            echo ""
+            print_info "检查生成的文件："
+            ls -la /root/.cloudflared/
+            
+            echo ""
+            print_info "删除测试隧道："
+            /usr/local/bin/cloudflared tunnel delete -f "$test_name"
+            ;;
+        3)
+            echo ""
+            print_info "当前授权状态："
+            echo "=============================================="
+            echo "1. /root/.cloudflared/ 目录内容："
+            ls -la /root/.cloudflared/ 2>/dev/null || echo "目录不存在"
+            
+            echo ""
+            echo "2. 证书文件检查："
+            if [[ -f "/root/.cloudflared/cert.pem" ]]; then
+                echo "  ✅ cert.pem 存在"
+                echo "  大小: $(stat -c%s /root/.cloudflared/cert.pem) 字节"
+            else
+                echo "  ❌ cert.pem 不存在"
+            fi
+            
+            echo ""
+            echo "3. 凭证文件检查："
+            local json_count=$(find /root/.cloudflared -name "*.json" -type f 2>/dev/null | wc -l)
+            if [[ $json_count -gt 0 ]]; then
+                echo "  ✅ 找到 $json_count 个JSON文件"
+                find /root/.cloudflared -name "*.json" -type f | while read file; do
+                    echo "  - $(basename "$file")"
+                done
+            else
+                echo "  ❌ 未找到JSON文件"
+            fi
+            echo "=============================================="
+            ;;
+        4)
+            return
+            ;;
+        *)
+            print_error "无效选项"
+            ;;
+    esac
+    
+    echo ""
+    print_input "按回车键返回修复菜单..."
+    read -r
+    manual_auth_fix
+}
+
+# ----------------------------
 # 显示菜单
 # ----------------------------
 show_menu() {
@@ -833,11 +999,12 @@ show_menu() {
     echo "  2) 卸载 Secure Tunnel"
     echo "  3) 查看服务状态"
     echo "  4) 查看配置信息"
-    echo "  5) 静默安装 (使用默认值)"
-    echo "  6) 退出"
+    echo "  5) 手动修复授权问题"
+    echo "  6) 静默安装 (使用默认值)"
+    echo "  7) 退出"
     echo ""
     
-    print_input "请输入选项 (1-6): "
+    print_input "请输入选项 (1-7): "
     read -r choice
     
     case "$choice" in
@@ -873,6 +1040,9 @@ show_menu() {
             read -r
             ;;
         5)
+            manual_auth_fix
+            ;;
+        6)
             SILENT_MODE=true
             if main_install; then
                 echo ""
@@ -885,7 +1055,7 @@ show_menu() {
                 read -r
             fi
             ;;
-        6)
+        7)
             print_info "再见！"
             exit 0
             ;;
@@ -922,6 +1092,10 @@ main() {
             show_title
             show_status
             ;;
+        "fix-auth")
+            show_title
+            manual_auth_fix
+            ;;
         "-y"|"--silent")
             SILENT_MODE=true
             show_title
@@ -938,6 +1112,7 @@ main() {
             echo "  sudo ./secure_tunnel.sh uninstall     # 卸载"
             echo "  sudo ./secure_tunnel.sh status        # 查看状态"
             echo "  sudo ./secure_tunnel.sh config        # 查看配置"
+            echo "  sudo ./secure_tunnel.sh fix-auth      # 修复授权"
             echo "  sudo ./secure_tunnel.sh -y            # 静默安装"
             exit 1
             ;;
