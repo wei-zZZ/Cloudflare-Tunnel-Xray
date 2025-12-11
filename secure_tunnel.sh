@@ -472,13 +472,14 @@ configure_services() {
 [Unit]
 Description=Secure Tunnel Xray Service
 After=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=$SERVICE_USER
 Group=$SERVICE_GROUP
 ExecStart=$BIN_DIR/xray run -config $CONFIG_DIR/xray.json
-Restart=on-failure
+Restart=always
 RestartSec=3
 StandardOutput=append:$LOG_DIR/xray.log
 StandardError=append:$LOG_DIR/xray-error.log
@@ -493,6 +494,7 @@ EOF
 Description=Secure Tunnel Argo Service
 After=network.target secure-tunnel-xray.service
 Wants=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -501,7 +503,7 @@ Group=root
 Environment="TUNNEL_ORIGIN_CERT=/root/.cloudflared/cert.pem"
 Environment="TUNNEL_METRICS=0.0.0.0:8080"
 ExecStart=$BIN_DIR/cloudflared tunnel --config $CONFIG_DIR/config.yaml run
-Restart=on-failure
+Restart=always
 RestartSec=5
 StandardOutput=append:$LOG_DIR/argo.log
 StandardError=append:$LOG_DIR/argo-error.log
@@ -1000,6 +1002,7 @@ stop_subscription_server() {
         print_success "端口 8080 已释放"
     fi
 }
+
 # ----------------------------
 # 调试订阅服务器
 # ----------------------------
