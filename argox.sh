@@ -283,52 +283,58 @@ setup_tunnel() {
     
     # 确保有凭证文件（如果没有则创建）
     local json_file=""
+    local target_tunnel_name="$TUNNEL_NAME" # 最终要用的隧道名
+
     if ls /root/.cloudflared/*.json 1> /dev/null 2>&1; then
-        json_file=$(ls /root/.cloudflared/*.json | head -1)
+        json_file=$(ls -t /root/.cloudflared/*.json | head -1)
         print_success "✅ 使用现有凭证文件: $(basename "$json_file")"
+        # 检查现有隧道是否可用，如果已有同名隧道，则直接使用
+        if "$BIN_DIR/cloudflared" tunnel list 2>/dev/null | grep -q "$TUNNEL_NAME"; then
+            print_info "✅ 发现同名隧道，直接使用现有隧道: $TUNNEL_NAME"
+        fi
     else
         print_warning "⚠️  未找到凭证文件，正在自动创建..."
         
-# 创建临时隧道来生成凭证
-local temp_tunnel="temp-$(date +%s)"
-print_info "创建临时隧道: $temp_tunnel (这可能需要几秒钟...)"
-if timeout 30 "$BIN_DIR/cloudflared" tunnel create "$temp_tunnel"; then
-    # 查找新生成的凭证文件
-    sleep 2  # 稍等确保文件写入
-    if ls /root/.cloudflared/*.json 1> /dev/null 2>&1; then
-        # 找到最新的那个 .json 文件
-        json_file=$(ls -t /root/.cloudflared/*.json | head -1)
-        print_success "✅ 已生成凭证文件: $(basename \"$json_file\")"
+        # === 核心修改：创建“临时”隧道，但后续直接将其作为“正式”隧道使用 ===
+        # 先清理可能存在的旧隧道
+        print_info "清理同名旧隧道: $TUNNEL_NAME"
+        "$BIN_DIR/cloudflared" tunnel delete -f "$TUNNEL_NAME" 2>/dev/null || true
+        sleep 2
         
-        # 删除临时隧道
-        print_info "清理临时隧道: $temp_tunnel"
-        "$BIN_DIR/cloudflared" tunnel delete -f "$temp_tunnel" 2>/dev/null || true
-    else
-        print_error "❌ 创建隧道后仍未生成凭证文件"
-        exit 1
-    fi
-else
-    print_error "❌ 无法创建临时隧道 (命令执行失败或超时)"
-    print_info "提示：手动运行 'cloudflared tunnel create test' 可以测试功能"
-    exit 1
-fi
-    fi
-    
-    if [[ -z "$USER_DOMAIN" ]]; then
-        if [ "$SILENT_MODE" = true ]; then
-            USER_DOMAIN="tunnel.example.com"
+        # 直接创建最终需要的隧道，避免后续删除
+        print_info "创建隧道: $TUNNEL_NAME (这可能需要几秒钟...)"
+        if timeout 30 "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME"; then
+            # 查找新生成的凭证文件
+            sleep 2
+            if ls /root/.cloudflared/*.json 1> /dev/null 2>&1; then
+                json_file=$(ls -t /root/.cloudflared/*.json | head -1)
+                print_success "✅ 隧道创建成功，凭证文件: $(basename "$json_file")"
+            else
+                print_error "❌ 创建隧道后仍未生成凭证文件"
+                exit 1
+            fi
         else
-            print_error "未设置域名"
+            print_error "❌ 无法创建隧道 (命令执行失败或超时)"
             exit 1
         fi
     fi
     
-    export TUNNEL_ORIGIN_CERT="/root/.cloudflared/cert.pem"
+    # 此时，$TUNNEL_NAME 隧道已经存在，$json_file 是其正确的凭证
+    # 获取隧道ID
+    local tunnel_id
+    tunnel_id=$("$BIN_DIR/cloudflared" tunnel list 2>/dev/null | grep "$TUNNEL_NAME" | awk '{print $1}')
     
-    # 清理可能存在的旧隧道
-    print_info "清理同名旧隧道..."
-    "$BIN_DIR/cloudflared" tunnel delete -f "$TUNNEL_NAME" 2>/dev/null || true
-    sleep 2
+    if [[ -z "$tunnel_id" ]]; then
+        print_error "❌ 无法获取隧道ID"
+        exit 1
+    fi
+    
+    print_success "✅ 隧道就绪 (名称: ${TUNNEL_NAME}, ID: ${tunnel_id})"
+    
+    # 绑定域名 (后续步骤保持不变)
+    print_info "绑定域名: $USER_DOMAIN"
+    "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN" > /dev/null 2>&1
+    print_success "✅ 域名绑定成功"
     
 # 创建正式隧道
 print_info "创建隧道: $TUNNEL_NAME"
