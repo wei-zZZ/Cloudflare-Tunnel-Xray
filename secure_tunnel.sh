@@ -1024,9 +1024,23 @@ main_install() {
     start_services
     show_connection_info
     
+    # ============== 添加订阅生成 ==============
+    echo ""
+    print_info "═══════════════════════════════════════════════"
+    print_info "           生成订阅链接"
+    print_info "═══════════════════════════════════════════════"
+    echo ""
+    
+    # 生成订阅
+    generate_subscription
+    
+    # 显示订阅信息
+    show_subscription
+    # ============== 添加结束 ==============
+    
     echo ""
     print_success "🎉 安装全部完成！"
-    print_info "请使用上面的VLESS链接配置您的客户端。"
+    print_info "请使用上面的VLESS链接或订阅链接配置您的客户端。"
 }
 
 # ----------------------------
