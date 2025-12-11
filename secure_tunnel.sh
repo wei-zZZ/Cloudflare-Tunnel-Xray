@@ -550,6 +550,360 @@ start_services() {
 # ----------------------------
 # 显示连接信息
 # ----------------------------
+# ----------------------------
+# 生成订阅链接
+# ----------------------------
+generate_subscription() {
+    print_info "生成订阅链接..."
+    
+    # 读取配置
+    if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
+        print_error "未找到配置文件"
+        return
+    fi
+    
+    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    
+    if [[ -z "$domain" ]] || [[ -z "$uuid" ]]; then
+        print_error "无法读取配置信息"
+        return
+    fi
+    
+    # 创建订阅配置目录
+    local SUB_DIR="$CONFIG_DIR/subscription"
+    mkdir -p "$SUB_DIR"
+    
+    # 1. 生成通用VLESS链接
+    local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道-TLS"
+    local vless_non_tls="vless://${uuid}@${domain}:80?encryption=none&security=none&type=ws&host=${domain}&path=%2F${uuid}#安全隧道-非TLS"
+    
+    # 2. 生成Clash配置
+    local clash_config=$(cat << EOF
+proxies:
+  - name: "安全隧道-TLS"
+    type: vless
+    server: ${domain}
+    port: 443
+    uuid: ${uuid}
+    network: ws
+    tls: true
+    udp: true
+    servername: ${domain}
+    ws-opts:
+      path: /${uuid}
+      headers:
+        Host: ${domain}
+  - name: "安全隧道-非TLS"
+    type: vless
+    server: ${domain}
+    port: 80
+    uuid: ${uuid}
+    network: ws
+    tls: false
+    udp: true
+    ws-opts:
+      path: /${uuid}
+      headers:
+        Host: ${domain}
+
+proxy-groups:
+  - name: 🚀 节点选择
+    type: select
+    proxies:
+      - "安全隧道-TLS"
+      - "安全隧道-非TLS"
+
+rules:
+  - DOMAIN-SUFFIX,openai.com,🚀 节点选择
+  - DOMAIN-SUFFIX,google.com,🚀 节点选择
+  - GEOIP,CN,DIRECT
+  - MATCH,🚀 节点选择
+EOF
+    )
+    
+    # 3. 生成Quantumult X配置
+    local quantumult_config=$(cat << EOF
+[vless]
+安全隧道-TLS = vless, ${domain}, 443, ${uuid}, ws-path=/${uuid}, ws-host=${domain}, tls=true, tls-host=${domain}, over-tls=true, certificate=1, group=安全隧道
+安全隧道-非TLS = vless, ${domain}, 80, ${uuid}, ws-path=/${uuid}, ws-host=${domain}, tls=false, group=安全隧道
+EOF
+    )
+    
+    # 4. 生成Shadowrocket/小火箭配置
+    local shadowrocket_config="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&path=/${uuid}&host=${domain}&tlsHost=${domain}#安全隧道"
+    
+    # 保存各种格式的配置文件
+    echo "$vless_tls" > "$SUB_DIR/vless_tls.txt"
+    echo "$vless_non_tls" > "$SUB_DIR/vless_non_tls.txt"
+    echo "$clash_config" > "$SUB_DIR/clash.yaml"
+    echo "$quantumult_config" > "$SUB_DIR/quantumult.conf"
+    echo "$shadowrocket_config" > "$SUB_DIR/shadowrocket.conf"
+    
+    # 5. 生成Base64编码的订阅链接（主流格式）
+    local base64_sub=$(echo -e "$vless_tls\n$vless_non_tls" | base64 -w 0)
+    
+    # 6. 生成Clash订阅链接
+    local base64_clash=$(echo "$clash_config" | base64 -w 0)
+    
+    # 7. 保存订阅链接到文件
+    cat > "$SUB_DIR/subscription.txt" << EOF
+# 安全隧道订阅链接
+# 生成时间: $(date)
+
+## 1. 通用Base64订阅
+${base64_sub}
+
+## 2. Clash订阅
+${base64_clash}
+
+## 3. 原始链接
+TLS链接: ${vless_tls}
+非TLS链接: ${vless_non_tls}
+
+## 4. 配置文件位置
+Clash配置: $SUB_DIR/clash.yaml
+Quantumult配置: $SUB_DIR/quantumult.conf
+Shadowrocket配置: $SUB_DIR/shadowrocket.conf
+EOF
+    
+    print_success "订阅链接生成完成！"
+}
+
+# ----------------------------
+# 显示订阅信息
+# ----------------------------
+show_subscription() {
+    print_info "═══════════════════════════════════════════════"
+    print_info "           订阅链接信息"
+    print_info "═══════════════════════════════════════════════"
+    echo ""
+    
+    local SUB_DIR="$CONFIG_DIR/subscription"
+    
+    if [[ ! -d "$SUB_DIR" ]]; then
+        print_info "未找到订阅目录，正在生成..."
+        generate_subscription
+    fi
+    
+    # 读取配置文件
+    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2 2>/dev/null)
+    local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2 2>/dev/null)
+    
+    if [[ -z "$domain" ]] || [[ -z "$uuid" ]]; then
+        print_error "无法读取配置信息"
+        return
+    fi
+    
+    # 1. 显示通用Base64订阅
+    local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道-TLS"
+    local vless_non_tls="vless://${uuid}@${domain}:80?encryption=none&security=none&type=ws&host=${domain}&path=%2F${uuid}#安全隧道-非TLS"
+    
+    local base64_sub=$(echo -e "$vless_tls\n$vless_non_tls" | base64 -w 0)
+    
+    print_success "📡 通用订阅链接:"
+    echo ""
+    echo "https://subscribe.example.com/subscribe?url=$(echo "$base64_sub" | tr -d '\n')"
+    echo ""
+    
+    # 简单本地HTTP服务链接（用于测试）
+    local server_ip=$(hostname -I | awk '{print $1}')
+    print_info "🌐 本地订阅地址（用于测试）:"
+    echo ""
+    echo "http://${server_ip}:8080/sub"
+    echo ""
+    
+    # 2. 显示Clash订阅
+    print_success "🎯 Clash 订阅链接:"
+    echo ""
+    echo "clash://install-config?url=http://${server_ip}:8080/clash.yaml"
+    echo ""
+    
+    # 3. 显示原始链接
+    print_success "🔗 原始配置链接:"
+    echo ""
+    echo "TLS链接:"
+    echo "$vless_tls"
+    echo ""
+    echo "非TLS链接:"
+    echo "$vless_non_tls"
+    echo ""
+    
+    # 4. 显示文件位置
+    print_info "📁 配置文件位置:"
+    echo "  订阅目录: $SUB_DIR"
+    echo "  Clash配置: $SUB_DIR/clash.yaml"
+    echo "  Quantumult配置: $SUB_DIR/quantumult.conf"
+    echo ""
+    
+    # 5. 启动本地订阅服务器的选项
+    print_warning "💡 提示："
+    echo "  1. 可以使用命令启动本地订阅服务器:"
+    echo "     sudo $0 start-server"
+    echo "  2. 订阅链接需在客户端中导入使用"
+    echo "  3. 建议使用TLS链接以获得更好的安全性"
+}
+
+# ----------------------------
+# 启动本地订阅服务器
+# ----------------------------
+start_subscription_server() {
+    print_info "启动本地订阅服务器..."
+    
+    local SUB_DIR="$CONFIG_DIR/subscription"
+    if [[ ! -d "$SUB_DIR" ]]; then
+        generate_subscription
+    fi
+    
+    # 检查是否已安装Python
+    if ! command -v python3 &> /dev/null; then
+        print_info "安装Python3..."
+        apt-get update && apt-get install -y python3
+    fi
+    
+    # 创建简单的HTTP服务器脚本
+    cat > "$SUB_DIR/server.py" << 'PYTHON_EOF'
+#!/usr/bin/env python3
+import http.server
+import socketserver
+import os
+import base64
+import time
+
+PORT = 8080
+SUB_DIR = os.path.dirname(os.path.abspath(__file__))
+
+class SubscriptionHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/sub':
+            # 通用订阅
+            vless_file = os.path.join(SUB_DIR, 'vless_tls.txt')
+            if os.path.exists(vless_file):
+                with open(vless_file, 'r') as f:
+                    vless_tls = f.read().strip()
+                with open(os.path.join(SUB_DIR, 'vless_non_tls.txt'), 'r') as f:
+                    vless_non_tls = f.read().strip()
+                
+                combined = f"{vless_tls}\n{vless_non_tls}"
+                encoded = base64.b64encode(combined.encode()).decode()
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain')
+                self.send_header('Subscription-Userinfo', 'upload=0; download=0; total=10737418240000000; expire=2546246231')
+                self.end_headers()
+                self.wfile.write(encoded.encode())
+                return
+        
+        elif self.path == '/clash.yaml':
+            # Clash配置
+            clash_file = os.path.join(SUB_DIR, 'clash.yaml')
+            if os.path.exists(clash_file):
+                self.send_response(200)
+                self.send_header('Content-type', 'text/yaml')
+                self.end_headers()
+                with open(clash_file, 'rb') as f:
+                    self.wfile.write(f.read())
+                return
+        
+        elif self.path == '/quantumult.conf':
+            # Quantumult配置
+            quantumult_file = os.path.join(SUB_DIR, 'quantumult.conf')
+            if os.path.exists(quantumult_file):
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                with open(quantumult_file, 'rb') as f:
+                    self.wfile.write(f.read())
+                return
+        
+        # 默认文件服务
+        self.directory = SUB_DIR
+        return super().do_GET()
+    
+    def log_message(self, format, *args):
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {args[0]} - {args[1]}")
+
+if __name__ == '__main__':
+    os.chdir(SUB_DIR)
+    with socketserver.TCPServer(("", PORT), SubscriptionHandler) as httpd:
+        print(f"订阅服务器运行在: http://0.0.0.0:{PORT}")
+        print("可用链接:")
+        print(f"  通用订阅: http://your-server-ip:{PORT}/sub")
+        print(f"  Clash配置: http://your-server-ip:{PORT}/clash.yaml")
+        print(f"  Quantumult配置: http://your-server-ip:{PORT}/quantumult.conf")
+        print("\n按 Ctrl+C 停止服务器")
+        httpd.serve_forever()
+PYTHON_EOF
+    
+    chmod +x "$SUB_DIR/server.py"
+    
+    # 启动服务器（后台运行）
+    cd "$SUB_DIR"
+    nohup python3 server.py > "$SUB_DIR/server.log" 2>&1 &
+    
+    local server_pid=$!
+    echo "$server_pid" > "$SUB_DIR/server.pid"
+    
+    sleep 2
+    
+    local server_ip=$(hostname -I | awk '{print $1}')
+    
+    print_success "✅ 订阅服务器已启动！"
+    echo ""
+    print_info "🌐 服务器地址: http://${server_ip}:8080"
+    print_info "📡 订阅链接: http://${server_ip}:8080/sub"
+    print_info "🎯 Clash订阅: http://${server_ip}:8080/clash.yaml"
+    echo ""
+    print_info "📋 管理命令:"
+    echo "  查看日志: tail -f $SUB_DIR/server.log"
+    echo "  停止服务器: sudo $0 stop-server"
+    echo "  服务器PID: $server_pid"
+}
+
+# ----------------------------
+# 停止本地订阅服务器
+# ----------------------------
+stop_subscription_server() {
+    local SUB_DIR="$CONFIG_DIR/subscription"
+    local pid_file="$SUB_DIR/server.pid"
+    
+    if [[ -f "$pid_file" ]]; then
+        local pid=$(cat "$pid_file")
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid"
+            print_success "✅ 订阅服务器已停止 (PID: $pid)"
+        else
+            print_warning "⚠️ 服务器进程不存在"
+        fi
+        rm -f "$pid_file"
+    else
+        print_warning "⚠️ 未找到服务器PID文件"
+    fi
+    
+    # 确保没有残留的Python服务器进程
+    pkill -f "server.py" 2>/dev/null && print_info "清理残留进程..."
+}
+
+# ----------------------------
+# 在show_connection_info中调用订阅生成
+# ----------------------------
+# 在show_connection_info函数末尾添加：
+show_connection_info() {
+    # ... 原有的显示代码 ...
+    
+    # 在显示完原有信息后添加：
+    echo ""
+    print_info "═══════════════════════════════════════════════"
+    print_info "           订阅链接"
+    print_info "═══════════════════════════════════════════════"
+    echo ""
+    
+    # 生成订阅
+    generate_subscription
+    
+    # 显示订阅信息
+    show_subscription
+}
 show_connection_info() {
     print_info "═══════════════════════════════════════════════"
     print_info "           安装完成！连接信息"
@@ -688,49 +1042,86 @@ main() {
     echo ""
     
     case "${1:-}" in
-        "install")
-            main_install
-            ;;
-        "status")
-            show_status
-            ;;
-        "restart")
-            systemctl restart secure-tunnel-xray.service secure-tunnel-argo.service
-            print_success "服务已重启"
-            ;;
-        "uninstall")
-            print_warning "正在卸载..."
-            systemctl stop secure-tunnel-xray.service secure-tunnel-argo.service 2>/dev/null || true
-            systemctl disable secure-tunnel-xray.service secure-tunnel-argo.service 2>/dev/null || true
-            rm -f /etc/systemd/system/secure-tunnel-*.service
-            systemctl daemon-reload
-            rm -rf "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" "/root/.cloudflared"
-            userdel "$SERVICE_USER" 2>/dev/null || true
-            print_success "卸载完成"
-            ;;
-        "config")
-            if [[ -f "$CONFIG_DIR/tunnel.conf" ]]; then
-                print_info "当前配置:"
-                cat "$CONFIG_DIR/tunnel.conf"
+    "install")
+        main_install
+        ;;
+    "status")
+        show_status
+        ;;
+    "restart")
+        systemctl restart secure-tunnel-xray.service secure-tunnel-argo.service
+        print_success "服务已重启"
+        ;;
+    "uninstall")
+        print_warning "正在卸载..."
+        systemctl stop secure-tunnel-xray.service secure-tunnel-argo.service 2>/dev/null || true
+        systemctl disable secure-tunnel-xray.service secure-tunnel-argo.service 2>/dev/null || true
+        rm -f /etc/systemd/system/secure-tunnel-*.service
+        systemctl daemon-reload
+        rm -rf "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" "/root/.cloudflared"
+        userdel "$SERVICE_USER" 2>/dev/null || true
+        print_success "卸载完成"
+        ;;
+    "config")
+        if [[ -f "$CONFIG_DIR/tunnel.conf" ]]; then
+            print_info "当前配置:"
+            cat "$CONFIG_DIR/tunnel.conf"
+        else
+            print_error "未找到配置文件"
+        fi
+        ;;
+    "auth")
+        print_info "重新授权..."
+        direct_cloudflare_auth
+        ;;
+    # 添加以下订阅相关命令：
+    "subscription")
+        show_subscription
+        ;;
+    "gen-sub")
+        generate_subscription
+        print_success "订阅链接已重新生成"
+        ;;
+    "start-server")
+        start_subscription_server
+        ;;
+    "stop-server")
+        stop_subscription_server
+        ;;
+    "server-status")
+        local SUB_DIR="$CONFIG_DIR/subscription"
+        local pid_file="$SUB_DIR/server.pid"
+        if [[ -f "$pid_file" ]]; then
+            local pid=$(cat "$pid_file")
+            if kill -0 "$pid" 2>/dev/null; then
+                print_success "✅ 订阅服务器正在运行 (PID: $pid)"
+                local server_ip=$(hostname -I | awk '{print $1}')
+                echo ""
+                print_info "🌐 服务器地址: http://${server_ip}:8080"
+                print_info "📡 订阅链接: http://${server_ip}:8080/sub"
             else
-                print_error "未找到配置文件"
+                print_error "❌ 服务器进程已停止"
             fi
-            ;;
-        "auth")
-            print_info "重新授权..."
-            direct_cloudflare_auth
-            ;;
-        *)
-            echo "使用方法:"
-            echo "  sudo $0 install      # 安装"
-            echo "  sudo $0 status       # 查看状态"
-            echo "  sudo $0 restart      # 重启服务"
-            echo "  sudo $0 config       # 查看配置"
-            echo "  sudo $0 auth         # 重新授权"
-            echo "  sudo $0 uninstall    # 卸载"
-            exit 1
-            ;;
-    esac
+        else
+            print_error "❌ 订阅服务器未运行"
+        fi
+        ;;
+    *)
+        echo "使用方法:"
+        echo "  sudo $0 install          # 安装"
+        echo "  sudo $0 status           # 查看状态"
+        echo "  sudo $0 restart          # 重启服务"
+        echo "  sudo $0 config           # 查看配置"
+        echo "  sudo $0 auth             # 重新授权"
+        echo "  sudo $0 subscription     # 显示订阅链接"
+        echo "  sudo $0 gen-sub          # 重新生成订阅"
+        echo "  sudo $0 start-server     # 启动订阅服务器"
+        echo "  sudo $0 stop-server      # 停止订阅服务器"
+        echo "  sudo $0 server-status    # 查看服务器状态"
+        echo "  sudo $0 uninstall        # 卸载"
+        exit 1
+        ;;
+esac
 }
 
 # 运行主函数
