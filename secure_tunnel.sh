@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
 # Cloudflare Tunnel + Xray 安装脚本 (优化版)
-# 版本: 5.0 - 静默安装 + 优化授权
+# 版本: 5.1 - 优化流程 + 静默安装
 # ============================================
 
 set -e
@@ -33,27 +33,26 @@ BIN_DIR="/usr/local/bin"
 SERVICE_USER="secure_tunnel"
 SERVICE_GROUP="secure_tunnel"
 
-# 用户输入变量
+# 用户输入变量（在安装过程中收集）
 USER_DOMAIN=""
 TUNNEL_NAME="secure-tunnel"
 SILENT_MODE=false
 
 # ----------------------------
-# 收集用户信息
+# 收集用户信息（优化：在授权前收集）
 # ----------------------------
 collect_user_info() {
-    clear
     echo ""
-    echo "╔══════════════════════════════════════════════╗"
-    echo "║    Cloudflare Tunnel 安装脚本 v5.0          ║"
-    echo "║        静默安装 + 优化授权                  ║"
-    echo "╚══════════════════════════════════════════════╝"
+    print_info "═══════════════════════════════════════════════"
+    print_info "           配置 Cloudflare Tunnel"
+    print_info "═══════════════════════════════════════════════"
     echo ""
     
     # 静默模式使用默认值
     if [ "$SILENT_MODE" = true ]; then
         USER_DOMAIN="tunnel.example.com"
         print_info "静默模式：使用默认域名 $USER_DOMAIN"
+        print_info "隧道名称: $TUNNEL_NAME"
         return
     fi
     
@@ -74,6 +73,12 @@ collect_user_info() {
     print_input "请输入隧道名称 [默认: secure-tunnel]:"
     read -r TUNNEL_NAME
     TUNNEL_NAME=${TUNNEL_NAME:-"secure-tunnel"}
+    
+    echo ""
+    print_success "配置已保存:"
+    echo "  域名: $USER_DOMAIN"
+    echo "  隧道名称: $TUNNEL_NAME"
+    echo ""
 }
 
 # ----------------------------
@@ -177,6 +182,9 @@ install_components() {
             chmod +x "$BIN_DIR/xray"
             print_success "Xray 安装成功"
         fi
+    else
+        print_error "Xray 下载失败"
+        exit 1
     fi
     
     # 下载并安装 cloudflared
@@ -184,6 +192,9 @@ install_components() {
         mv /tmp/cloudflared "$BIN_DIR/cloudflared"
         chmod +x "$BIN_DIR/cloudflared"
         print_success "cloudflared 安装成功"
+    else
+        print_error "cloudflared 下载失败"
+        exit 1
     fi
     
     # 清理临时文件
@@ -237,6 +248,16 @@ setup_tunnel() {
     if [[ ! -f "/root/.cloudflared/cert.pem" ]]; then
         print_error "未找到证书文件"
         exit 1
+    fi
+    
+    # 检查是否已收集用户信息
+    if [[ -z "$USER_DOMAIN" ]]; then
+        if [ "$SILENT_MODE" = true ]; then
+            USER_DOMAIN="tunnel.example.com"
+        else
+            print_error "未设置域名，请重新运行脚本"
+            exit 1
+        fi
     fi
     
     export TUNNEL_ORIGIN_CERT="/root/.cloudflared/cert.pem"
@@ -458,19 +479,36 @@ show_connection_info() {
 }
 
 # ----------------------------
-# 主安装流程
+# 主安装流程（重新排列顺序）
 # ----------------------------
 main_install() {
     print_info "开始安装流程..."
     
-    collect_user_info
+    # 1. 系统检查和组件安装（不需要用户输入）
+    clear
+    echo ""
+    echo "╔══════════════════════════════════════════════╗"
+    echo "║    Cloudflare Tunnel 安装脚本 v5.1          ║"
+    echo "║        优化流程 + 静默安装                  ║"
+    echo "╚══════════════════════════════════════════════╝"
+    echo ""
+    
     check_system
     install_components
+    
+    # 2. Cloudflare 授权
     direct_cloudflare_auth
+    
+    # 3. 收集用户信息（现在才收集域名和隧道名）
+    collect_user_info
+    
+    # 4. 设置隧道和配置
     setup_tunnel
     configure_xray
     configure_services
     start_services
+    
+    # 5. 显示连接信息
     show_connection_info
     
     echo ""
@@ -503,6 +541,31 @@ show_config() {
 }
 
 # ----------------------------
+# 显示服务状态
+# ----------------------------
+show_status() {
+    print_info "服务状态检查..."
+    
+    if systemctl is-active --quiet secure-tunnel-xray.service; then
+        print_success "Xray 服务: 运行中"
+    else
+        print_error "Xray 服务: 未运行"
+    fi
+    
+    if systemctl is-active --quiet secure-tunnel-argo.service; then
+        print_success "Argo Tunnel 服务: 运行中"
+    else
+        print_error "Argo Tunnel 服务: 未运行"
+    fi
+    
+    echo ""
+    print_info "详细状态:"
+    systemctl status secure-tunnel-xray.service --no-pager -l | head -20
+    echo ""
+    systemctl status secure-tunnel-argo.service --no-pager -l | head -20
+}
+
+# ----------------------------
 # 主函数
 # ----------------------------
 main() {
@@ -510,14 +573,6 @@ main() {
     if [[ "$1" == "-y" ]] || [[ "$2" == "-y" ]]; then
         SILENT_MODE=true
     fi
-    
-    clear
-    echo ""
-    echo "╔══════════════════════════════════════════════╗"
-    echo "║    Cloudflare Tunnel 一键安装脚本 v5.0      ║"
-    echo "║        静默安装 + 优化授权                  ║"
-    echo "╚══════════════════════════════════════════════╝"
-    echo ""
     
     case "${1:-}" in
         "install")
@@ -527,15 +582,20 @@ main() {
             show_config
             ;;
         "status")
-            systemctl status secure-tunnel-xray.service --no-pager -l
-            echo ""
-            systemctl status secure-tunnel-argo.service --no-pager -l
+            show_status
             ;;
         "-y"|"--silent")
             SILENT_MODE=true
             main_install
             ;;
         *)
+            clear
+            echo ""
+            echo "╔══════════════════════════════════════════════╗"
+            echo "║    Cloudflare Tunnel 一键安装脚本 v5.1      ║"
+            echo "║        优化流程 + 静默安装                  ║"
+            echo "╚══════════════════════════════════════════════╝"
+            echo ""
             echo "使用方法:"
             echo "  sudo ./secure_tunnel.sh install       # 交互式安装"
             echo "  sudo ./secure_tunnel.sh -y           # 静默安装"
