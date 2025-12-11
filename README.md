@@ -46,7 +46,7 @@ sudo ./secure_tunnel.sh install
 
 # 一条命令完成所有操作
 
-curl -L https://raw.githubusercontent.com/your-repo/secure_tunnel.sh -o secure_tunnel.sh && chmod +x secure_tunnel.sh && sudo ./secure_tunnel.sh install
+curl -L https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/secure_tunnel.sh -o secure_tunnel.sh && chmod +x secure_tunnel.sh && sudo ./secure_tunnel.sh install
 
 3. 静默安装（使用默认配置）
 
