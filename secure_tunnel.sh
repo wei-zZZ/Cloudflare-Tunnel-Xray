@@ -598,7 +598,7 @@ show_connection_info() {
     echo "      Host: ${domain}"
     echo ""
     
-    # 显示订阅信息
+    # 生成订阅信息
     echo ""
     print_info "═══════════════════════════════════════════════"
     print_info "           订阅链接"
@@ -609,7 +609,7 @@ show_connection_info() {
     local SUB_DIR="$CONFIG_DIR/subscription"
     mkdir -p "$SUB_DIR"
     
-    # 生成简单的订阅链接
+    # 生成VLESS链接
     local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道"
     local vless_non_tls="vless://${uuid}@${domain}:80?encryption=none&security=none&type=ws&host=${domain}&path=%2F${uuid}#安全隧道-非TLS"
     
@@ -624,7 +624,7 @@ show_connection_info() {
     
     print_success "📡 订阅链接已生成:"
     echo ""
-    echo "通用订阅 (V2rayN/NekoBox):"
+    echo "通用订阅 (Base64, 用于V2rayN/NekoBox):"
     echo "$base64_sub"
     echo ""
     echo "原始链接:"
@@ -706,6 +706,13 @@ start_subscription_server() {
         apt-get update && apt-get install -y python3
     fi
     
+    # 检查端口是否被占用（使用Bash方式）
+    if ss -tulpn | grep ":8080" >/dev/null; then
+        print_warning "端口 8080 已被占用，尝试停止现有服务..."
+        pkill -f "server.py" 2>/dev/null || true
+        sleep 2
+    fi
+    
     # 创建简单的HTTP服务器脚本
     cat > "$SUB_DIR/server.py" << 'PYTHON_EOF'
 #!/usr/bin/env python3
@@ -767,17 +774,6 @@ PYTHON_EOF
     
     chmod +x "$SUB_DIR/server.py"
     
-    # 检查端口是否被占用
-    import socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    result = sock.connect_ex(('127.0.0.1', PORT))
-    sock.close()
-    
-    if result == 0:
-        print_warning "端口 8080 已被占用，尝试停止现有服务..."
-        pkill -f "server.py" 2>/dev/null || true
-        sleep 2
-    
     # 启动服务器（后台运行）
     cd "$SUB_DIR"
     nohup python3 server.py > "$SUB_DIR/server.log" 2>&1 &
@@ -835,6 +831,70 @@ stop_subscription_server() {
 }
 
 # ----------------------------
+# 显示订阅信息
+# ----------------------------
+show_subscription() {
+    print_info "═══════════════════════════════════════════════"
+    print_info "           订阅链接信息"
+    print_info "═══════════════════════════════════════════════"
+    echo ""
+    
+    # 检查是否已安装
+    if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
+        print_error "未找到配置文件，请先安装"
+        return
+    fi
+    
+    # 读取配置
+    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    
+    if [[ -z "$domain" ]] || [[ -z "$uuid" ]]; then
+        print_error "无法读取配置信息"
+        return
+    fi
+    
+    # 生成链接
+    local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道"
+    local vless_non_tls="vless://${uuid}@${domain}:80?encryption=none&security=none&type=ws&host=${domain}&path=%2F${uuid}#安全隧道-非TLS"
+    local base64_sub=$(echo -e "${vless_tls}\n${vless_non_tls}" | base64 -w 0)
+    
+    print_success "📡 订阅链接:"
+    echo ""
+    echo "通用订阅 (Base64):"
+    echo "$base64_sub"
+    echo ""
+    echo "VLESS TLS 链接:"
+    echo "$vless_tls"
+    echo ""
+    echo "VLESS 非TLS 链接:"
+    echo "$vless_non_tls"
+    echo ""
+    
+    # 检查订阅服务器状态
+    local SUB_DIR="$CONFIG_DIR/subscription"
+    local pid_file="$SUB_DIR/server.pid"
+    local server_ip=$(hostname -I | awk '{print $1}' | head -1)
+    
+    if [[ -f "$pid_file" ]]; then
+        local pid=$(cat "$pid_file")
+        if kill -0 "$pid" 2>/dev/null; then
+            print_success "✅ 订阅服务器正在运行"
+            echo ""
+            print_info "访问地址:"
+            echo "  订阅链接: http://${server_ip}:8080/sub"
+            echo "  VLESS链接: http://${server_ip}:8080/vless"
+        else
+            print_info "订阅服务器未运行"
+            echo "  启动命令: sudo ./secure_tunnel.sh start-server"
+        fi
+    else
+        print_info "订阅服务器未运行"
+        echo "  启动命令: sudo ./secure_tunnel.sh start-server"
+    fi
+}
+
+# ----------------------------
 # 主安装流程
 # ----------------------------
 main_install() {
@@ -883,32 +943,7 @@ main() {
         stop_subscription_server
         ;;
     "subscription")
-        # 显示订阅信息
-        if [[ -f "$CONFIG_DIR/tunnel.conf" ]]; then
-            local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-            local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-            
-            if [[ -n "$domain" && -n "$uuid" ]]; then
-                echo "=== 订阅链接信息 ==="
-                echo ""
-                echo "域名: $domain"
-                echo "UUID: $uuid"
-                echo ""
-                echo "VLESS TLS 链接:"
-                echo "vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道"
-                echo ""
-                echo "VLESS 非TLS 链接:"
-                echo "vless://${uuid}@${domain}:80?encryption=none&security=none&type=ws&host=${domain}&path=%2F${uuid}#安全隧道-非TLS"
-                echo ""
-                echo "=== 使用方法 ==="
-                echo "1. 启动订阅服务器: sudo ./secure_tunnel.sh start-server"
-                echo "2. 然后访问显示的链接获取订阅"
-            else
-                print_error "无法读取配置信息"
-            fi
-        else
-            print_error "未找到配置文件，请先安装"
-        fi
+        show_subscription
         ;;
     *)
         echo "使用方法:"
