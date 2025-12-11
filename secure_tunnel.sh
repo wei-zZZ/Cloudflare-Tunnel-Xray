@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
 # Cloudflare Tunnel + Xray 安装脚本 (增强版)
-# 版本: 5.0 - 支持URL格式订阅
+# 版本: 4.4-fixed - 修复下载问题
 # ============================================
 
 set -e
@@ -32,22 +32,19 @@ BIN_DIR="/usr/local/bin"
 SERVICE_USER="secure_tunnel"
 SERVICE_GROUP="secure_tunnel"
 
-# 订阅服务器端口（可自定义）
-SUBSCRIPTION_PORT="8081"  # 改为8081避免冲突
-
 # 用户输入变量
 USER_DOMAIN=""
 TUNNEL_NAME="secure-tunnel"
 
 # ----------------------------
-# 收集用户信息
+# 收集用户信息（保持不变）
 # ----------------------------
 collect_user_info() {
     clear
     echo ""
     echo "╔══════════════════════════════════════════════╗"
-    echo "║    Cloudflare Tunnel 安装脚本 v5.0          ║"
-    echo "║        支持URL格式订阅                      ║"
+    echo "║    Cloudflare Tunnel 安装脚本                ║"
+    echo "║                版本 4.4-fixed                ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
     
@@ -87,7 +84,7 @@ collect_user_info() {
 }
 
 # ----------------------------
-# 系统检查
+# 系统检查（保持不变）
 # ----------------------------
 check_system() {
     print_info "检查系统环境..."
@@ -112,23 +109,44 @@ check_system() {
     print_success "系统检查完成"
 }
 
-# ----------------------------
-# 安装组件
-# ----------------------------
+# ============================================
+# 核心修改：增强的安装组件函数
+# ============================================
 install_components() {
     print_info "安装必要组件..."
     
     local arch
     arch=$(uname -m)
     
+    # 设置下载URL（多个备用源）
     case "$arch" in
         x86_64|amd64)
-            local xray_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
-            local cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+            # Xray 多个备用源
+            local xray_urls=(
+                "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+                "https://ghproxy.com/https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+                "https://ghproxy.ghproxy.workers.dev/https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+            )
+            # cloudflared 多个备用源
+            local cf_urls=(
+                "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+                "https://ghproxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+                "https://ghproxy.ghproxy.workers.dev/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+            )
             ;;
         aarch64|arm64)
-            local xray_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip"
-            local cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+            # Xray 多个备用源
+            local xray_urls=(
+                "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip"
+                "https://ghproxy.com/https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip"
+                "https://ghproxy.ghproxy.workers.dev/https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip"
+            )
+            # cloudflared 多个备用源
+            local cf_urls=(
+                "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+                "https://ghproxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+                "https://ghproxy.ghproxy.workers.dev/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+            )
             ;;
         *)
             print_error "不支持的架构: $arch"
@@ -136,43 +154,129 @@ install_components() {
             ;;
     esac
     
-    # 下载并安装 Xray
-    print_info "下载 Xray..."
-    wget -q --show-progress -O /tmp/xray.zip "$xray_url" || {
-        print_warning "下载失败，尝试备用链接..."
-        wget -q --show-progress -O /tmp/xray.zip "https://ghproxy.com/$xray_url" || {
-            print_error "Xray下载失败"
-            exit 1
-        }
+    # 增强的下载函数（带重试和备用源）
+    download_file() {
+        local urls=("$@")
+        local output_file="${urls[-1]}"
+        unset "urls[${#urls[@]}-1]"
+        
+        local max_retries=3
+        local source_num=1
+        
+        for url in "${urls[@]}"; do
+            print_info "尝试下载 (源${source_num}/${#urls[@]}): $(basename "$output_file")"
+            
+            for ((retry=1; retry<=max_retries; retry++)); do
+                print_info "重试 $retry/$max_retries..."
+                
+                # 使用wget下载，显示进度但不显示过多信息
+                if wget --timeout=45 --tries=2 --no-check-certificate \
+                       --show-progress -q -O "$output_file.tmp" "$url" 2>&1 | \
+                       grep -E "(100%|保存至)" | tail -1; then
+                    
+                    # 检查文件是否有效
+                    if [[ -s "$output_file.tmp" ]]; then
+                        mv "$output_file.tmp" "$output_file"
+                        print_success "✅ 下载成功: $(basename "$output_file")"
+                        return 0
+                    else
+                        rm -f "$output_file.tmp"
+                        print_warning "文件为空，重试..."
+                    fi
+                else
+                    print_warning "下载失败，重试..."
+                fi
+                
+                if [[ $retry -lt $max_retries ]]; then
+                    sleep 2
+                fi
+            done
+            
+            print_warning "当前源失败，尝试下一个源..."
+            ((source_num++))
+            sleep 1
+        done
+        
+        print_error "❌ 所有下载源都失败: $(basename "$output_file")"
+        return 1
     }
     
-    unzip -q -d /tmp /tmp/xray.zip
-    find /tmp -name "xray" -type f -exec mv {} "$BIN_DIR/" \;
-    chmod +x "$BIN_DIR/xray"
+    # 下载并安装 Xray
+    print_info "下载 Xray..."
+    if download_file "${xray_urls[@]}" "/tmp/xray.zip"; then
+        # 解压安装
+        unzip -q -d /tmp /tmp/xray.zip 2>/dev/null || {
+            print_warning "解压失败，尝试直接查找文件..."
+            # 有些版本的文件结构不同
+            find /tmp -name "xray" -type f -exec mv {} "$BIN_DIR/" \; 2>/dev/null
+        }
+        
+        # 确保xray可执行文件存在
+        if [[ -f "/tmp/xray" ]]; then
+            mv /tmp/xray "$BIN_DIR/"
+        fi
+        
+        chmod +x "$BIN_DIR/xray" 2>/dev/null || {
+            print_warning "设置权限失败，继续安装..."
+        }
+        
+        # 验证安装
+        if "$BIN_DIR/xray" version &> /dev/null; then
+            print_success "✅ Xray 安装成功"
+        else
+            # 如果版本检查失败，但文件存在，也继续
+            if [[ -f "$BIN_DIR/xray" ]]; then
+                print_warning "⚠️ Xray 安装完成但版本检查失败"
+            else
+                print_error "❌ Xray 安装失败"
+                exit 1
+            fi
+        fi
+    else
+        print_error "❌ Xray 下载失败，无法继续安装"
+        exit 1
+    fi
     
     # 下载并安装 cloudflared
     print_info "下载 cloudflared..."
-    wget -q --show-progress -O "$BIN_DIR/cloudflared" "$cf_url" || {
-        print_warning "下载失败，尝试备用链接..."
-        wget -q --show-progress -O "$BIN_DIR/cloudflared" "https://ghproxy.com/$cf_url" || {
-            print_error "cloudflared下载失败"
-            exit 1
-        }
-    }
-    chmod +x "$BIN_DIR/cloudflared"
+    if download_file "${cf_urls[@]}" "/tmp/cloudflared"; then
+        mv /tmp/cloudflared "$BIN_DIR/cloudflared"
+        chmod +x "$BIN_DIR/cloudflared"
+        
+        # 验证安装
+        if "$BIN_DIR/cloudflared" --version &> /dev/null; then
+            print_success "✅ cloudflared 安装成功"
+        else
+            # 如果版本检查失败，但文件存在，也继续
+            if [[ -f "$BIN_DIR/cloudflared" ]]; then
+                print_warning "⚠️ cloudflared 安装完成但版本检查失败"
+            else
+                print_error "❌ cloudflared 安装失败"
+                exit 1
+            fi
+        fi
+    else
+        print_error "❌ cloudflared 下载失败，无法继续安装"
+        exit 1
+    fi
     
     # 清理临时文件
-    rm -f /tmp/xray.zip
+    rm -f /tmp/xray.zip /tmp/xray /tmp/cloudflared 2>/dev/null
+    rm -rf /tmp/systemd-private-* 2>/dev/null || true
     
-    print_success "组件安装完成"
+    print_success "✅ 组件安装完成"
 }
 
+# ============================================
+# 以下是原脚本的其他函数（保持不变）
+# ============================================
+
 # ----------------------------
-# Cloudflare 授权
+# 直接服务器授权（无浏览器）
 # ----------------------------
 direct_cloudflare_auth() {
     print_warning "═══════════════════════════════════════════════"
-    print_warning "    Cloudflare 授权"
+    print_warning "    服务器直接授权模式"
     print_warning "═══════════════════════════════════════════════"
     echo ""
     
@@ -184,7 +288,14 @@ direct_cloudflare_auth() {
     print_info "开始 Cloudflare 授权..."
     echo ""
     
-    # 运行 cloudflared tunnel login
+    # 方法：直接在服务器运行授权命令
+    print_info "正在启动 Cloudflare 授权..."
+    print_info "这将在终端中显示一个链接，请复制到浏览器打开"
+    echo ""
+    print_warning "请准备好浏览器访问以下链接："
+    echo ""
+    
+    # 运行 cloudflared tunnel login，它会自动生成链接
     "$BIN_DIR/cloudflared" tunnel login
     
     echo ""
@@ -192,22 +303,65 @@ direct_cloudflare_auth() {
     read -r
     
     # 检查授权是否成功
+    check_auth_status
+}
+
+# ----------------------------
+# 检查授权状态
+# ----------------------------
+check_auth_status() {
+    print_info "检查授权状态..."
+    
     local max_checks=5
     local check_count=0
     
     while [[ $check_count -lt $max_checks ]]; do
         if [[ -f "/root/.cloudflared/cert.pem" ]]; then
             print_success "✅ 授权成功！证书已生成"
+            print_info "证书位置: /root/.cloudflared/cert.pem"
+            print_info "证书大小: $(ls -lh "/root/.cloudflared/cert.pem" | awk '{print $5}')"
             return 0
         fi
+        
+        print_info "等待证书生成... (${check_count}/5)"
         sleep 3
         ((check_count++))
     done
     
+    # 如果还没找到证书，尝试其他位置
+    print_warning "未找到标准位置的证书，尝试其他位置..."
+    
+    local found_cert=""
+    for cert_path in "/root/.cloudflared/cert.pem" "/root/.cloudflare-warp/cert.pem" "/etc/cloudflared/cert.pem"; do
+        if [[ -f "$cert_path" ]]; then
+            found_cert="$cert_path"
+            break
+        fi
+    done
+    
+    if [[ -n "$found_cert" ]]; then
+        # 复制到标准位置
+        cp "$found_cert" "/root/.cloudflared/cert.pem"
+        print_success "✅ 找到证书并复制到标准位置"
+        print_info "证书位置: /root/.cloudflared/cert.pem"
+        return 0
+    fi
+    
     print_error "❌ 未检测到授权证书！"
+    print_error "可能的原因："
+    print_error "1. 授权未完成"
+    print_error "2. 使用了错误的 Cloudflare 账户"
+    print_error "3. 未选择正确的域名"
+    echo ""
+    
+    # 提供手动选项
     print_input "按回车键重试授权，或按 Ctrl+C 退出"
     read -r
+    
+    # 杀掉可能还在运行的 cloudflared 进程
     pkill -f "cloudflared tunnel login" 2>/dev/null || true
+    
+    # 重新尝试
     direct_cloudflare_auth
 }
 
@@ -217,11 +371,14 @@ direct_cloudflare_auth() {
 setup_tunnel() {
     print_info "设置 Cloudflare Tunnel..."
     
+    # 验证证书是否存在
     if [[ ! -f "/root/.cloudflared/cert.pem" ]]; then
-        print_error "错误：未找到证书文件"
+        print_error "错误：未找到证书文件 /root/.cloudflared/cert.pem"
+        print_error "请确保已完成 Cloudflare 授权"
         exit 1
     fi
     
+    # 设置证书环境变量
     export TUNNEL_ORIGIN_CERT="/root/.cloudflared/cert.pem"
     
     # 检查是否已存在同名隧道
@@ -243,15 +400,19 @@ setup_tunnel() {
         
         if [[ -z "$tunnel_id" ]]; then
             print_error "无法获取隧道ID"
+            print_info "尝试直接列出所有隧道："
+            "$BIN_DIR/cloudflared" tunnel list
             exit 1
         fi
     fi
     
-    # 查找JSON文件
+    # 查找JSON文件（可能以隧道ID命名）
     local json_file="/root/.cloudflared/${tunnel_id}.json"
     if [[ ! -f "$json_file" ]]; then
+        # 尝试查找以隧道名命名的文件
         json_file="/root/.cloudflared/${TUNNEL_NAME}.json"
         if [[ ! -f "$json_file" ]]; then
+            # 查找所有JSON文件
             json_file=$(find /root/.cloudflared -name "*.json" -type f | head -1)
         fi
     fi
@@ -260,7 +421,7 @@ setup_tunnel() {
     print_info "绑定域名: $USER_DOMAIN"
     "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN"
     
-    # 保存隧道配置
+    # 保存隧道配置（使用安全的方式）
     mkdir -p "$CONFIG_DIR"
     cat > "$CONFIG_DIR/tunnel.conf" << EOF
 # Cloudflare Tunnel 配置
@@ -271,11 +432,39 @@ CERT_PATH=/root/.cloudflared/cert.pem
 CREATED_DATE=$(date +"%Y-%m-%d")
 EOF
     
+    # 如果找到了JSON文件，记录路径
     if [[ -f "$json_file" ]]; then
         echo "TUNNEL_JSON=$json_file" >> "$CONFIG_DIR/tunnel.conf"
+        print_info "隧道凭证文件: $json_file"
     fi
     
     print_success "✅ 隧道设置完成 (ID: ${tunnel_id})"
+}
+
+# ----------------------------
+# 安全读取配置文件
+# ----------------------------
+read_config() {
+    local config_file="$CONFIG_DIR/tunnel.conf"
+    
+    if [[ ! -f "$config_file" ]]; then
+        print_error "配置文件不存在: $config_file"
+        exit 1
+    fi
+    
+    # 使用while循环读取，避免source命令解析问题
+    while IFS='=' read -r key value; do
+        # 跳过注释行和空行
+        [[ "$key" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$key" ]] && continue
+        
+        # 去除空格
+        key=$(echo "$key" | xargs)
+        value=$(echo "$value" | xargs)
+        
+        # 设置变量
+        declare -g "$key"="$value"
+    done < "$config_file"
 }
 
 # ----------------------------
@@ -284,17 +473,10 @@ EOF
 configure_xray() {
     print_info "配置 Xray..."
     
-    # 读取配置
-    local config_file="$CONFIG_DIR/tunnel.conf"
-    if [[ ! -f "$config_file" ]]; then
-        print_error "配置文件不存在"
-        exit 1
-    fi
+    # 安全读取配置文件
+    read_config
     
-    local tunnel_id=$(grep "^TUNNEL_ID=" "$config_file" | cut -d'=' -f2)
-    local domain=$(grep "^DOMAIN=" "$config_file" | cut -d'=' -f2)
-    
-    if [[ -z "$tunnel_id" ]]; then
+    if [[ -z "$TUNNEL_ID" ]]; then
         print_error "无法读取隧道ID"
         exit 1
     fi
@@ -302,9 +484,9 @@ configure_xray() {
     # 生成UUID和端口
     local uuid
     uuid=$(cat /proc/sys/kernel/random/uuid)
-    local port=10000
+    local port=10000  # 固定端口，便于管理
     
-    # 追加到配置文件
+    # 追加到配置文件（使用安全的方式）
     echo "" >> "$CONFIG_DIR/tunnel.conf"
     echo "# Xray 配置" >> "$CONFIG_DIR/tunnel.conf"
     echo "UUID=$uuid" >> "$CONFIG_DIR/tunnel.conf"
@@ -313,7 +495,7 @@ configure_xray() {
     # 创建配置目录
     mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     
-    # 生成Xray配置文件
+    # 生成Xray配置文件（适配 Xray-core 25.x 版本）
     cat > "$CONFIG_DIR/xray.json" << EOF
 {
     "log": {
@@ -352,30 +534,39 @@ configure_xray() {
 EOF
     
     # 创建隧道配置文件
-    local json_path="/root/.cloudflared/${tunnel_id}.json"
+    # 使用正确的JSON文件路径
+    local json_path="/root/.cloudflared/${TUNNEL_ID}.json"
     if [[ ! -f "$json_path" ]]; then
         json_path="/root/.cloudflared/${TUNNEL_NAME}.json"
         if [[ ! -f "$json_path" ]]; then
+            # 最后尝试查找任意JSON文件
             json_path=$(find /root/.cloudflared -name "*.json" -type f | head -1)
         fi
     fi
     
     if [[ ! -f "$json_path" ]]; then
         print_error "找不到隧道凭证JSON文件"
+        print_info "请在 /root/.cloudflared/ 目录下查找JSON文件"
         exit 1
     fi
     
     cat > "$CONFIG_DIR/config.yaml" << EOF
-tunnel: $tunnel_id
+tunnel: $TUNNEL_ID
 credentials-file: $json_path
 originCert: /root/.cloudflared/cert.pem
 
 ingress:
-  - hostname: $domain
+  - hostname: $DOMAIN
     service: http://localhost:$port
     originRequest:
       noTLSVerify: true
-      httpHostHeader: $domain
+      connectTimeout: 30s
+      tlsTimeout: 30s
+      tcpKeepAlive: 30s
+      noHappyEyeballs: false
+      keepAliveConnections: 100
+      keepAliveTimeout: 90s
+      httpHostHeader: $DOMAIN
   - service: http_status:404
 EOF
     
@@ -388,7 +579,7 @@ EOF
 configure_services() {
     print_info "配置系统服务..."
     
-    # 创建专用用户
+    # 创建专用用户（用于运行服务）
     if ! id -u "$SERVICE_USER" &> /dev/null; then
         useradd -r -s /usr/sbin/nologin "$SERVICE_USER"
     fi
@@ -401,6 +592,7 @@ configure_services() {
 [Unit]
 Description=Secure Tunnel Xray Service
 After=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -421,12 +613,15 @@ EOF
 [Unit]
 Description=Secure Tunnel Argo Service
 After=network.target secure-tunnel-xray.service
+Wants=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=root
 Group=root
 Environment="TUNNEL_ORIGIN_CERT=/root/.cloudflared/cert.pem"
+Environment="TUNNEL_METRICS=0.0.0.0:8080"
 ExecStart=$BIN_DIR/cloudflared tunnel --config $CONFIG_DIR/config.yaml run
 Restart=always
 RestartSec=5
@@ -437,7 +632,9 @@ StandardError=append:$LOG_DIR/argo-error.log
 WantedBy=multi-user.target
 EOF
     
+    # 重新加载systemd
     systemctl daemon-reload
+    
     print_success "系统服务配置完成"
 }
 
@@ -456,6 +653,7 @@ start_services() {
         journalctl -u secure-tunnel-xray.service -n 10 --no-pager
     fi
     
+    # 等待Xray启动
     sleep 2
     
     # 启动Argo Tunnel
@@ -467,265 +665,12 @@ start_services() {
         journalctl -u secure-tunnel-argo.service -n 10 --no-pager
     fi
     
+    # 等待服务稳定
     sleep 3
 }
 
 # ----------------------------
-# 生成URL格式订阅
-# ----------------------------
-generate_url_subscription() {
-    print_info "生成URL格式订阅..."
-    
-    local SUB_DIR="$CONFIG_DIR/subscription"
-    mkdir -p "$SUB_DIR"
-    
-    # 读取配置
-    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    
-    if [[ -z "$domain" ]] || [[ -z "$uuid" ]]; then
-        print_error "无法读取配置信息"
-        return 1
-    fi
-    
-    # 生成随机路径（类似您示例中的格式）
-    local random_path=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 12 | head -n 1)
-    local short_uuid=$(echo "$uuid" | cut -d'-' -f1)
-    
-    # 1. 标准VLESS链接
-    local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道"
-    local vless_non_tls="vless://${uuid}@${domain}:80?encryption=none&security=none&type=ws&host=${domain}&path=%2F${uuid}#安全隧道-非TLS"
-    
-    # 2. 生成URL格式订阅
-    cat > "$SUB_DIR/url_subscription.txt" << EOF
-# ============================================
-# URL格式订阅 - 安全隧道
-# 生成时间: $(date)
-# ============================================
-
-# 标准订阅链接（Base64编码）:
-$(echo -e "${vless_tls}\n${vless_non_tls}" | base64 -w 0)
-
-# ============================================
-# URL格式订阅（用于支持URL订阅的客户端）:
-# ============================================
-
-# 格式1: 标准HTTPS URL
-https://${domain}/proxy
-https://${domain}/vless
-https://${domain}/ws-proxy
-
-# 格式2: 带端口的URL
-https://${domain}:443/vless-proxy
-https://${domain}:8443/${random_path}
-
-# 格式3: 带UUID的URL
-https://${domain}/proxy/${short_uuid}
-https://${domain}/v2ray/${uuid}
-
-# 格式4: WebSocket格式
-wss://${domain}/${uuid}
-ws://${domain}/${uuid}
-
-# 格式5: 自定义路径（推荐使用）
-https://${domain}:8443/${random_path}
-https://${domain}/subscribe/${random_path}
-
-# ============================================
-# 节点详细配置:
-# ============================================
-地址: ${domain}
-端口: 443 (TLS) / 80 (非TLS)
-用户ID: ${uuid}
-传输协议: WebSocket
-路径: /${uuid}
-TLS: 启用
-
-# ============================================
-# 客户端配置示例:
-# ============================================
-1. V2rayN: 使用标准VLESS链接
-2. Clash: 使用Clash配置格式
-3. Shadowrocket: 使用标准VLESS链接
-4. 其他支持URL订阅的客户端: 使用上面的任意URL格式
-EOF
-    
-    # 3. 创建简化的URL文件（一行一个URL）
-    cat > "$SUB_DIR/url_links.txt" << EOF
-https://${domain}/proxy
-https://${domain}:8443/${random_path}
-https://${domain}/subscribe/${short_uuid}
-wss://${domain}/${uuid}
-$(echo -e "${vless_tls}\n${vless_non_tls}" | base64 -w 0)
-EOF
-    
-    # 4. 创建单个URL文件（最简格式）
-    echo "https://${domain}:8443/${random_path}" > "$SUB_DIR/single_url.txt"
-    echo "https://${domain}/proxy/${short_uuid}" > "$SUB_DIR/simple_url.txt"
-    
-    # 5. 创建Base64订阅文件
-    echo -e "${vless_tls}\n${vless_non_tls}" | base64 -w 0 > "$SUB_DIR/base64.txt"
-    
-    print_success "✅ URL格式订阅已生成"
-    print_info "订阅文件保存在: $SUB_DIR/"
-    
-    # 显示生成的URL
-    echo ""
-    print_info "📡 生成的订阅URL:"
-    echo "1. 标准URL: https://${domain}/proxy"
-    echo "2. 带端口URL: https://${domain}:8443/${random_path}"
-    echo "3. 简化URL: https://${domain}/proxy/${short_uuid}"
-    echo ""
-    print_info "📁 订阅文件:"
-    echo "  URL列表: $SUB_DIR/url_links.txt"
-    echo "  单个URL: $SUB_DIR/single_url.txt"
-    echo "  Base64: $SUB_DIR/base64.txt"
-}
-
-# ----------------------------
-# 启动HTTP订阅服务器
-# ----------------------------
-start_http_server() {
-    print_info "启动HTTP订阅服务器..."
-    
-    local SUB_DIR="$CONFIG_DIR/subscription"
-    
-    # 检查目录
-    if [[ ! -d "$SUB_DIR" ]]; then
-        print_error "订阅目录不存在，请先生成订阅"
-        return 1
-    fi
-    
-    # 检查端口是否被占用
-    if ss -tulpn | grep ":$SUBSCRIPTION_PORT" >/dev/null; then
-        print_warning "端口 $SUBSCRIPTION_PORT 已被占用，尝试释放..."
-        pkill -f "python3.*$SUBSCRIPTION_PORT" 2>/dev/null || true
-        sleep 2
-        sudo fuser -k $SUBSCRIPTION_PORT/tcp 2>/dev/null || true
-        sleep 2
-    fi
-    
-    # 创建简单的HTTP服务器
-    cat > "$SUB_DIR/simple_server.py" << 'PYEOF'
-#!/usr/bin/env python3
-import http.server
-import socketserver
-import os
-import sys
-
-PORT = 8081  # 使用8081端口避免冲突
-DIR = os.path.dirname(os.path.abspath(__file__))
-
-class Handler(http.server.SimpleHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/html; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(b'<h1>订阅服务器</h1><p><a href="/sub">获取订阅</a></p>')
-        elif self.path == '/sub':
-            # 返回base64订阅
-            sub_file = os.path.join(DIR, 'base64.txt')
-            if os.path.exists(sub_file):
-                with open(sub_file, 'r') as f:
-                    content = f.read().strip()
-                self.send_response(200)
-                self.send_header('Content-type', 'text/plain; charset=utf-8')
-                self.end_headers()
-                self.wfile.write(content.encode())
-            else:
-                self.send_error(404, "File not found")
-        elif self.path == '/url':
-            # 返回URL格式订阅
-            url_file = os.path.join(DIR, 'single_url.txt')
-            if os.path.exists(url_file):
-                with open(url_file, 'r') as f:
-                    content = f.read().strip()
-                self.send_response(200)
-                self.send_header('Content-type', 'text/plain; charset=utf-8')
-                self.end_headers()
-                self.wfile.write(content.encode())
-            else:
-                self.send_error(404, "File not found")
-        else:
-            # 静态文件服务
-            self.directory = DIR
-            super().do_GET()
-    
-    def log_message(self, format, *args):
-        pass  # 禁用日志
-
-if __name__ == '__main__':
-    os.chdir(DIR)
-    try:
-        with socketserver.TCPServer(("", PORT), Handler) as httpd:
-            print(f"订阅服务器运行在: http://0.0.0.0:{PORT}")
-            print(f"订阅链接: http://服务器IP:{PORT}/sub")
-            print(f"URL订阅: http://服务器IP:{PORT}/url")
-            httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("\n服务器已停止")
-    except Exception as e:
-        print(f"错误: {e}")
-        sys.exit(1)
-PYEOF
-    
-    chmod +x "$SUB_DIR/simple_server.py"
-    
-    # 停止可能存在的旧服务器
-    pkill -f "simple_server.py" 2>/dev/null || true
-    sleep 2
-    
-    # 启动新服务器
-    cd "$SUB_DIR"
-    nohup python3 simple_server.py > server.log 2>&1 &
-    local pid=$!
-    echo $pid > "$SUB_DIR/server.pid"
-    
-    sleep 3
-    
-    if kill -0 $pid 2>/dev/null; then
-        local server_ip=$(hostname -I | awk '{print $1}' | head -1)
-        print_success "✅ HTTP订阅服务器启动成功！"
-        echo ""
-        print_info "访问地址:"
-        echo "  http://${server_ip}:${SUBSCRIPTION_PORT}"
-        echo "  订阅链接: http://${server_ip}:${SUBSCRIPTION_PORT}/sub"
-        echo "  URL格式: http://${server_ip}:${SUBSCRIPTION_PORT}/url"
-        echo ""
-        print_info "服务器PID: $pid"
-        print_info "日志文件: $SUB_DIR/server.log"
-    else
-        print_error "❌ 服务器启动失败"
-        tail -20 "$SUB_DIR/server.log"
-        return 1
-    fi
-}
-
-# ----------------------------
-# 停止HTTP服务器
-# ----------------------------
-stop_http_server() {
-    print_info "停止HTTP订阅服务器..."
-    
-    local SUB_DIR="$CONFIG_DIR/subscription"
-    local pid_file="$SUB_DIR/server.pid"
-    
-    if [[ -f "$pid_file" ]]; then
-        local pid=$(cat "$pid_file")
-        if kill -0 $pid 2>/dev/null; then
-            kill $pid
-            sleep 2
-            print_success "✅ 服务器已停止"
-        fi
-        rm -f "$pid_file"
-    else
-        pkill -f "simple_server.py" 2>/dev/null && print_success "✅ 服务器已停止"
-    fi
-}
-
-# ----------------------------
-# 显示连接信息
+# 显示连接信息（包含订阅）
 # ----------------------------
 show_connection_info() {
     print_info "═══════════════════════════════════════════════"
@@ -733,11 +678,13 @@ show_connection_info() {
     print_info "═══════════════════════════════════════════════"
     echo ""
     
+    # 安全读取配置
     if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
         print_error "未找到配置文件"
         return
     fi
     
+    # 直接读取关键变量
     local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     
@@ -752,27 +699,428 @@ show_connection_info() {
     print_success "🛣️  路径: /$uuid"
     echo ""
     
-    # 生成URL格式订阅
-    generate_url_subscription
-    
+    print_info "📋 VLESS 连接配置:"
     echo ""
-    print_info "🌐 使用方法:"
-    echo "1. 标准VLESS链接:"
-    echo "   vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=/${uuid}#安全隧道"
-    echo ""
-    echo "2. URL格式订阅（推荐）:"
-    echo "   https://${domain}/proxy"
-    echo "   https://${domain}:8443/$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 10 | head -n 1)"
-    echo ""
-    echo "3. 启动本地订阅服务器:"
-    echo "   sudo ./secure_tunnel_v2.sh start-server"
+    echo "vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=/${uuid}#安全隧道"
     echo ""
     
-    print_info "🔧 服务管理:"
-    echo "  启动隧道: systemctl start secure-tunnel-{xray,argo}"
-    echo "  停止隧道: systemctl stop secure-tunnel-{xray,argo}"
-    echo "  查看状态: systemctl status secure-tunnel-argo.service"
-    echo "  查看日志: journalctl -u secure-tunnel-argo.service -f"
+    print_info "⚙️  Clash 配置:"
+    echo ""
+    echo "- name: 安全隧道"
+    echo "  type: vless"
+    echo "  server: ${domain}"
+    echo "  port: 443"
+    echo "  uuid: ${uuid}"
+    echo "  network: ws"
+    echo "  tls: true"
+    echo "  udp: true"
+    echo "  ws-opts:"
+    echo "    path: /${uuid}"
+    echo "    headers:"
+    echo "      Host: ${domain}"
+    echo ""
+    
+    # 生成订阅信息
+    echo ""
+    print_info "═══════════════════════════════════════════════"
+    print_info "           订阅链接"
+    print_info "═══════════════════════════════════════════════"
+    echo ""
+    
+    # 生成订阅目录
+    local SUB_DIR="$CONFIG_DIR/subscription"
+    mkdir -p "$SUB_DIR"
+    
+    # 生成VLESS链接
+    local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道"
+    local vless_non_tls="vless://${uuid}@${domain}:80?encryption=none&security=none&type=ws&host=${domain}&path=%2F${uuid}#安全隧道-非TLS"
+    
+    # 保存到文件
+    echo "$vless_tls" > "$SUB_DIR/vless_tls.txt"
+    echo "$vless_non_tls" > "$SUB_DIR/vless_non_tls.txt"
+    
+    # 生成base64订阅
+    local combined_links="${vless_tls}\n${vless_non_tls}"
+    local base64_sub=$(echo -e "$combined_links" | base64 -w 0)
+    echo "$base64_sub" > "$SUB_DIR/base64.txt"
+    
+    print_success "📡 订阅链接已生成:"
+    echo ""
+    echo "通用订阅 (Base64, 用于V2rayN/NekoBox):"
+    echo "$base64_sub"
+    echo ""
+    echo "原始链接:"
+    echo "TLS: $vless_tls"
+    echo "非TLS: $vless_non_tls"
+    echo ""
+    
+    # 获取服务器IP
+    local server_ip=$(hostname -I | awk '{print $1}' | head -1)
+    
+    print_info "🌐 快速使用方法:"
+    echo ""
+    if [[ -n "$server_ip" ]]; then
+        echo "1. 启动订阅服务器:"
+        echo "   sudo ./secure_tunnel_fixed.sh start-server"
+        echo ""
+        echo "2. 然后访问:"
+        echo "   http://${server_ip}:8080/sub"
+        echo "  或直接使用上面的base64订阅链接"
+    else
+        echo "1. 复制上面的base64订阅链接"
+        echo "2. 在V2rayN/NekoBox客户端中导入"
+    fi
+    echo ""
+    
+    print_info "🔧 服务管理命令:"
+    echo "  启动: systemctl start secure-tunnel-{xray,argo}"
+    echo "  停止: systemctl stop secure-tunnel-{xray,argo}"
+    echo "  状态: systemctl status secure-tunnel-{xray,argo}"
+    echo "  日志: journalctl -u secure-tunnel-argo.service -f"
+    echo ""
+    
+    print_info "📁 配置文件位置:"
+    echo "  Xray配置: $CONFIG_DIR/xray.json"
+    echo "  隧道配置: $CONFIG_DIR/config.yaml"
+    echo "  连接信息: $CONFIG_DIR/tunnel.conf"
+    echo "  订阅目录: $CONFIG_DIR/subscription/"
+    echo ""
+    
+    print_warning "⚠️ 重要提示:"
+    print_warning "1. 请等待几分钟让DNS生效"
+    print_warning "2. 在Cloudflare DNS中确认 $domain 已正确解析"
+    print_warning "3. 首次连接可能需要等待证书签发"
+}
+
+# ----------------------------
+# 启动本地订阅服务器（保持原样）
+# ----------------------------
+start_subscription_server() {
+    print_info "启动本地订阅服务器..."
+    
+    # 首先停止可能已经在运行的服务
+    stop_subscription_server
+    
+    local SUB_DIR="$CONFIG_DIR/subscription"
+    
+    # 创建订阅目录
+    if [[ ! -d "$SUB_DIR" ]]; then
+        print_info "创建订阅目录..."
+        mkdir -p "$SUB_DIR"
+    fi
+    
+    # 确保有配置文件
+    if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
+        print_error "错误：未找到配置文件 $CONFIG_DIR/tunnel.conf"
+        print_error "请先运行安装命令：sudo ./secure_tunnel_fixed.sh install"
+        return 1
+    fi
+    
+    # 读取配置信息
+    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    
+    if [[ -z "$domain" ]] || [[ -z "$uuid" ]]; then
+        print_error "无法读取域名或UUID，请检查配置文件"
+        return 1
+    fi
+    
+    print_success "读取配置成功"
+    print_info "域名: $domain"
+    print_info "UUID: $uuid"
+    
+    # 生成订阅内容
+    local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道"
+    local vless_non_tls="vless://${uuid}@${domain}:80?encryption=none&security=none&type=ws&host=${domain}&path=%2F${uuid}#安全隧道-非TLS"
+    
+    # 生成base64订阅
+    local combined_links="${vless_tls}\n${vless_non_tls}"
+    local base64_sub=$(echo -e "$combined_links" | base64 -w 0)
+    
+    # 保存到文件
+    echo "$vless_tls" > "$SUB_DIR/vless_tls.txt"
+    echo "$vless_non_tls" > "$SUB_DIR/vless_non_tls.txt"
+    echo "$base64_sub" > "$SUB_DIR/base64.txt"
+    
+    print_success "✅ 订阅文件已生成"
+    
+    # 检查Python3是否可用
+    if ! command -v python3 &> /dev/null; then
+        print_info "安装Python3..."
+        apt-get update && apt-get install -y python3 python3-pip
+    fi
+    
+    # 检查端口是否被占用
+    if ss -tulpn | grep ":8080" >/dev/null; then
+        print_warning "端口 8080 已被占用，正在释放..."
+        pkill -f "server.py" 2>/dev/null || true
+        sleep 2
+    fi
+    
+    # 创建更稳定的HTTP服务器脚本
+    cat > "$SUB_DIR/server.py" << 'PYTHON_EOF'
+#!/usr/bin/env python3
+import http.server
+import socketserver
+import os
+import sys
+import time
+from urllib.parse import urlparse
+
+PORT = 8080
+SUB_DIR = os.path.dirname(os.path.abspath(__file__))
+
+class SubscriptionHandler(http.server.SimpleHTTPRequestHandler):
+    
+    def do_GET(self):
+        parsed_path = urlparse(self.path)
+        path = parsed_path.path
+        
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 访问路径: {path}")
+        
+        if path == '/':
+            # 显示欢迎页面
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.end_headers()
+            html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <title>订阅服务器</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 40px; }
+                    .container { max-width: 800px; margin: 0 auto; }
+                    h1 { color: #333; }
+                    .link { background: #f5f5f5; padding: 15px; margin: 10px 0; border-radius: 5px; }
+                    .btn { display: inline-block; padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 5px; }
+                    .btn:hover { background: #0056b3; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>📡 订阅服务器</h1>
+                    <p>请选择您需要的订阅格式：</p>
+                    
+                    <div class="link">
+                        <h3>📋 通用订阅 (Base64)</h3>
+                        <p>适用于 V2rayN/NekoBox 等客户端</p>
+                        <a class="btn" href="/sub">获取订阅链接</a>
+                        <a class="btn" href="/base64.txt" download>下载文件</a>
+                    </div>
+                    
+                    <div class="link">
+                        <h3>🔗 VLESS 链接</h3>
+                        <p>单个VLESS配置链接</p>
+                        <a class="btn" href="/vless">获取VLESS链接</a>
+                        <a class="btn" href="/vless_tls.txt" download>下载文件</a>
+                    </div>
+                    
+                    <div class="link">
+                        <h3>📁 文件列表</h3>
+                        <p>查看所有可用文件</p>
+                        <a class="btn" href="/list">查看文件</a>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            self.wfile.write(html.encode('utf-8'))
+            
+        elif path == '/sub':
+            # 通用订阅
+            base64_file = os.path.join(SUB_DIR, 'base64.txt')
+            if os.path.exists(base64_file):
+                with open(base64_file, 'r') as f:
+                    encoded = f.read().strip()
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Disposition', 'attachment; filename="subscription.txt"')
+                self.send_header('Subscription-Userinfo', 'upload=0; download=0; total=10737418240000000; expire=2546246231')
+                self.end_headers()
+                self.wfile.write(encoded.encode('utf-8'))
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 发送订阅内容，长度: {len(encoded)}")
+            else:
+                self.send_error(404, "File not found: base64.txt")
+                
+        elif path == '/vless':
+            # VLESS链接
+            vless_file = os.path.join(SUB_DIR, 'vless_tls.txt')
+            if os.path.exists(vless_file):
+                with open(vless_file, 'r') as f:
+                    content = f.read().strip()
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Disposition', 'attachment; filename="vless.txt"')
+                self.end_headers()
+                self.wfile.write(content.encode('utf-8'))
+            else:
+                self.send_error(404, "File not found: vless_tls.txt")
+                
+        elif path == '/list':
+            # 文件列表
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.end_headers()
+            
+            files = os.listdir(SUB_DIR)
+            html = f"<h1>文件列表</h1><ul>"
+            for file in files:
+                if os.path.isfile(os.path.join(SUB_DIR, file)):
+                    html += f'<li><a href="/{file}">{file}</a></li>'
+            html += "</ul>"
+            self.wfile.write(html.encode('utf-8'))
+            
+        else:
+            # 静态文件服务
+            file_path = os.path.join(SUB_DIR, path.lstrip('/'))
+            if os.path.exists(file_path) and os.path.isfile(file_path):
+                self.directory = SUB_DIR
+                super().do_GET()
+            else:
+                self.send_error(404, "File not found")
+
+    def log_message(self, format, *args):
+        # 禁用默认日志
+        pass
+
+if __name__ == '__main__':
+    # 设置工作目录
+    os.chdir(SUB_DIR)
+    
+    try:
+        with socketserver.TCPServer(("", PORT), SubscriptionHandler) as httpd:
+            print(f"=" * 50)
+            print(f"订阅服务器已启动!")
+            print(f"=" * 50)
+            print(f"服务器地址: http://0.0.0.0:{PORT}")
+            print(f"可用链接:")
+            print(f"  1. 首页: http://0.0.0.0:{PORT}/")
+            print(f"  2. 通用订阅: http://0.0.0.0:{PORT}/sub")
+            print(f"  3. VLESS链接: http://0.0.0.0:{PORT}/vless")
+            print(f"  4. 文件列表: http://0.0.0.0:{PORT}/list")
+            print(f"=" * 50)
+            print("按 Ctrl+C 停止服务器")
+            print(f"=" * 50)
+            
+            httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n服务器已停止")
+    except Exception as e:
+        print(f"服务器错误: {e}")
+        sys.exit(1)
+PYTHON_EOF
+    
+    # 设置权限
+    chmod +x "$SUB_DIR/server.py"
+    
+    # 确保在正确目录启动
+    cd "$SUB_DIR"
+    
+    # 启动服务器（后台运行）
+    print_info "启动订阅服务器..."
+    nohup python3 server.py > "$SUB_DIR/server.log" 2>&1 &
+    
+    local server_pid=$!
+    echo "$server_pid" > "$SUB_DIR/server.pid"
+    
+    sleep 3
+    
+    # 检查服务器是否启动成功
+    if kill -0 "$server_pid" 2>/dev/null; then
+        # 获取服务器IP
+        local server_ip=$(hostname -I | awk '{print $1}' | head -1)
+        if [ -z "$server_ip" ]; then
+            server_ip="127.0.0.1"
+        fi
+        
+        print_success "✅ 订阅服务器启动成功！"
+        echo ""
+        print_info "🌐 访问地址:"
+        echo "  http://${server_ip}:8080"
+        echo ""
+        print_info "📡 重要链接:"
+        echo "  通用订阅: http://${server_ip}:8080/sub"
+        echo "  VLESS链接: http://${server_ip}:8080/vless"
+        echo "  文件列表: http://${server_ip}:8080/list"
+        echo ""
+        print_info "📋 使用方法:"
+        echo "  1. 在客户端中导入: http://${server_ip}:8080/sub"
+        echo "  2. 或在浏览器中访问上面的链接获取配置"
+        echo ""
+        print_info "📊 服务器状态:"
+        echo "  PID: $server_pid"
+        echo "  日志: $SUB_DIR/server.log"
+        echo "  配置文件: $SUB_DIR/"
+        
+        # 测试服务器是否响应
+        print_info "测试服务器响应..."
+        if curl -s "http://${server_ip}:8080/" > /dev/null 2>&1; then
+            print_success "✅ 服务器响应正常"
+        else
+            print_warning "⚠️ 服务器启动但无法访问，请检查防火墙"
+            echo "  检查命令: sudo ufw allow 8080/tcp"
+        fi
+    else
+        print_error "❌ 服务器启动失败"
+        print_info "查看错误日志:"
+        tail -20 "$SUB_DIR/server.log"
+        return 1
+    fi
+}
+
+# ----------------------------
+# 停止本地订阅服务器（保持原样）
+# ----------------------------
+stop_subscription_server() {
+    print_info "停止订阅服务器..."
+    
+    local SUB_DIR="$CONFIG_DIR/subscription"
+    local pid_file="$SUB_DIR/server.pid"
+    
+    if [[ -f "$pid_file" ]]; then
+        local pid=$(cat "$pid_file")
+        print_info "找到服务器进程 PID: $pid"
+        
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid"
+            sleep 2
+            
+            if kill -0 "$pid" 2>/dev/null; then
+                print_warning "进程未正常退出，强制终止..."
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+            
+            print_success "✅ 订阅服务器已停止"
+        else
+            print_warning "⚠️ 进程 $pid 已不存在"
+        fi
+        
+        rm -f "$pid_file"
+    else
+        print_info "未找到PID文件，尝试查找并停止相关进程..."
+    fi
+    
+    # 清理所有相关的Python进程
+    local pids=$(pgrep -f "server.py" 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+        print_info "清理残留进程..."
+        for pid in $pids; do
+            kill "$pid" 2>/dev/null || true
+        done
+        sleep 1
+        pkill -f "server.py" 2>/dev/null && print_info "清理完成"
+    fi
+    
+    # 检查端口是否释放
+    if ss -tulpn | grep ":8080" >/dev/null; then
+        print_warning "端口 8080 仍被占用"
+    else
+        print_success "端口 8080 已释放"
+    fi
 }
 
 # ----------------------------
@@ -781,7 +1129,10 @@ show_connection_info() {
 main_install() {
     print_info "开始安装流程..."
     
+    # 收集用户信息
     collect_user_info
+    
+    # 执行安装步骤
     check_system
     install_components
     direct_cloudflare_auth
@@ -793,48 +1144,9 @@ main_install() {
     
     echo ""
     print_success "🎉 安装全部完成！"
-}
-
-# ----------------------------
-# 显示订阅信息
-# ----------------------------
-show_subscription() {
-    print_info "显示订阅信息..."
-    
-    if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
-        print_error "未安装，请先运行: sudo ./secure_tunnel_v2.sh install"
-        return 1
-    fi
-    
-    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    
     echo ""
-    print_success "当前配置:"
-    echo "  域名: $domain"
-    echo "  UUID: $uuid"
-    echo ""
-    
-    # 重新生成订阅
-    generate_url_subscription
-    
-    # 显示订阅内容
-    local SUB_DIR="$CONFIG_DIR/subscription"
-    if [[ -f "$SUB_DIR/single_url.txt" ]]; then
-        print_info "📡 订阅URL:"
-        cat "$SUB_DIR/single_url.txt"
-        echo ""
-    fi
-    
-    if [[ -f "$SUB_DIR/base64.txt" ]]; then
-        print_info "🔐 Base64订阅:"
-        head -c 100 "$SUB_DIR/base64.txt"
-        echo "..."
-        echo ""
-    fi
-    
-    print_info "📁 订阅文件位置: $SUB_DIR/"
-    ls -la "$SUB_DIR/" 2>/dev/null || echo "目录不存在"
+    print_info "要启动订阅服务器，请运行:"
+    echo "  sudo ./secure_tunnel_fixed.sh start-server"
 }
 
 # ----------------------------
@@ -844,37 +1156,36 @@ main() {
     clear
     echo ""
     echo "╔══════════════════════════════════════════════╗"
-    echo "║    Cloudflare Tunnel 一键安装脚本 v5.0      ║"
-    echo "║        支持URL格式订阅                      ║"
+    echo "║    Cloudflare Tunnel 一键安装脚本            ║"
+    echo "║                版本4.4-fixed (修复下载问题)  ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
     
     case "${1:-}" in
-        "install")
-            main_install
-            ;;
-        "start-server")
-            start_http_server
-            ;;
-        "stop-server")
-            stop_http_server
-            ;;
-        "subscription")
-            show_subscription
-            ;;
-        "status")
-            systemctl status secure-tunnel-xray.service
-            systemctl status secure-tunnel-argo.service
-            ;;
-        *)
-            echo "使用方法:"
-            echo "  sudo ./secure_tunnel_v2.sh install         # 安装"
-            echo "  sudo ./secure_tunnel_v2.sh start-server    # 启动订阅服务器"
-            echo "  sudo ./secure_tunnel_v2.sh stop-server     # 停止订阅服务器"
-            echo "  sudo ./secure_tunnel_v2.sh subscription    # 显示订阅信息"
-            echo "  sudo ./secure_tunnel_v2.sh status          # 查看服务状态"
-            exit 1
-            ;;
+    "install")
+        main_install
+        ;;
+    "start-server")
+        start_subscription_server
+        ;;
+    "stop-server")
+        stop_subscription_server
+        ;;
+    "subscription")
+        show_subscription
+        ;;
+    "debug-sub")
+        debug_subscription
+        ;;
+    *)
+        echo "使用方法:"
+        echo "  sudo ./secure_tunnel_fixed.sh install         # 安装"
+        echo "  sudo ./secure_tunnel_fixed.sh start-server    # 启动订阅服务器"
+        echo "  sudo ./secure_tunnel_fixed.sh stop-server     # 停止订阅服务器"
+        echo "  sudo ./secure_tunnel_fixed.sh subscription    # 显示订阅链接"
+        echo "  sudo ./secure_tunnel_fixed.sh debug-sub       # 调试订阅服务器"
+        exit 1
+        ;;
     esac
 }
 
