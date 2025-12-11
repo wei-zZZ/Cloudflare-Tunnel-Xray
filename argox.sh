@@ -330,22 +330,35 @@ fi
     "$BIN_DIR/cloudflared" tunnel delete -f "$TUNNEL_NAME" 2>/dev/null || true
     sleep 2
     
-    # 创建正式隧道
-    print_info "创建隧道: $TUNNEL_NAME"
-    "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME" > /dev/null 2>&1
-    
-    local tunnel_id
-    tunnel_id=$("$BIN_DIR/cloudflared" tunnel list 2>/dev/null | grep "$TUNNEL_NAME" | awk '{print $1}')
-    
-    if [[ -z "$tunnel_id" ]]; then
-        print_error "无法获取隧道ID"
-        exit 1
-    fi
-    
-    print_success "✅ 隧道创建成功 (ID: ${tunnel_id})"
-    
-    # 绑定域名
-    print_info "绑定域名: $USER_DOMAIN"
+# 创建正式隧道
+print_info "创建隧道: $TUNNEL_NAME"
+"$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME" > /dev/null 2>&1
+
+local tunnel_id
+tunnel_id=$("$BIN_DIR/cloudflared" tunnel list 2>/dev/null | grep "$TUNNEL_NAME" | awk '{print $1}')
+
+if [[ -z "$tunnel_id" ]]; then
+    print_error "无法获取隧道ID"
+    exit 1
+fi
+
+print_success "✅ 隧道创建成功 (ID: ${tunnel_id})"
+
+# === 新增：获取并更新正式隧道的凭证文件路径 ===
+print_info "更新正式隧道凭证文件..."
+# 查找最新生成的.json文件（应为刚创建的隧道生成）
+local latest_cred_file=$(ls -t /root/.cloudflared/*.json 2>/dev/null | head -1)
+if [[ -n "$latest_cred_file" ]]; then
+    json_file="$latest_cred_file"
+    print_success "✅ 已更新凭证文件: $(basename "$json_file")"
+else
+    print_error "❌ 未找到正式隧道的凭证文件"
+    exit 1
+fi
+# === 新增代码结束 ===
+
+# 绑定域名
+print_info "绑定域名: $USER_DOMAIN"
     "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN" > /dev/null 2>&1
     print_success "✅ 域名绑定成功"
     
