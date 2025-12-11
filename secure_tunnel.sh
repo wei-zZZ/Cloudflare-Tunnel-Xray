@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================
-# Cloudflare Tunnel + Xray 安装脚本 (优化版)
+# Cloudflare Tunnel + Xray 安装脚本
 # 版本: 5.2 - 修复授权链接显示问题
 # ============================================
 
@@ -34,7 +34,6 @@ BIN_DIR="/usr/local/bin"
 SERVICE_USER="secure_tunnel"
 SERVICE_GROUP="secure_tunnel"
 
-# 用户输入变量（在安装过程中收集）
 USER_DOMAIN=""
 TUNNEL_NAME="secure-tunnel"
 SILENT_MODE=false
@@ -49,7 +48,6 @@ collect_user_info() {
     print_info "═══════════════════════════════════════════════"
     echo ""
     
-    # 静默模式使用默认值
     if [ "$SILENT_MODE" = true ]; then
         USER_DOMAIN="tunnel.example.com"
         print_info "静默模式：使用默认域名 $USER_DOMAIN"
@@ -57,7 +55,6 @@ collect_user_info() {
         return
     fi
     
-    # 获取域名
     while [[ -z "$USER_DOMAIN" ]]; do
         print_input "请输入您的域名 (例如: tunnel.yourdomain.com):"
         read -r USER_DOMAIN
@@ -70,7 +67,6 @@ collect_user_info() {
         fi
     done
     
-    # 获取隧道名称
     print_input "请输入隧道名称 [默认: secure-tunnel]:"
     read -r TUNNEL_NAME
     TUNNEL_NAME=${TUNNEL_NAME:-"secure-tunnel"}
@@ -93,7 +89,6 @@ check_system() {
         exit 1
     fi
     
-    # 检查必要工具
     local required_tools=("curl" "unzip" "wget")
     for tool in "${required_tools[@]}"; do
         if ! command -v "$tool" &> /dev/null; then
@@ -117,7 +112,6 @@ install_components() {
     local arch
     arch=$(uname -m)
     
-    # 设置下载URL（多个备用源）
     case "$arch" in
         x86_64|amd64)
             local xray_urls=(
@@ -135,7 +129,7 @@ install_components() {
                 "https://ghproxy.com/https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip"
             )
             local cf_urls=(
-                "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-armd64"
+                "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
                 "https://ghproxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
             )
             ;;
@@ -145,7 +139,6 @@ install_components() {
             ;;
     esac
     
-    # 增强的下载函数
     download_with_retry() {
         local urls=("$@")
         local output_file="${urls[-1]}"
@@ -174,7 +167,6 @@ install_components() {
         return 1
     }
     
-    # 下载并安装 Xray
     if download_with_retry "${xray_urls[@]}" "/tmp/xray.zip"; then
         unzip -q -o /tmp/xray.zip -d /tmp/
         local xray_binary=$(find /tmp -name "xray" -type f | head -1)
@@ -188,7 +180,6 @@ install_components() {
         exit 1
     fi
     
-    # 下载并安装 cloudflared
     if download_with_retry "${cf_urls[@]}" "/tmp/cloudflared"; then
         mv /tmp/cloudflared "$BIN_DIR/cloudflared"
         chmod +x "$BIN_DIR/cloudflared"
@@ -198,12 +189,11 @@ install_components() {
         exit 1
     fi
     
-    # 清理临时文件
     rm -rf /tmp/xray* /tmp/cloudflare* 2>/dev/null
 }
 
 # ----------------------------
-# Cloudflare 授权（修复版）
+# Cloudflare 授权
 # ----------------------------
 direct_cloudflare_auth() {
     echo ""
@@ -220,26 +210,19 @@ direct_cloudflare_auth() {
     print_auth "请复制以下链接在浏览器中打开完成授权："
     print_auth "---------------------------------------------"
     
-    # 方法1：直接运行并捕获输出
     print_info "正在运行 cloudflared tunnel login..."
     echo ""
     
-    # 运行命令并捕获输出
     local auth_output
     auth_output=$("$BIN_DIR/cloudflared" tunnel login 2>&1 | tee /tmp/cloudflared_auth.log)
     
-    # 尝试多种方法提取URL
     local auth_url=""
-    
-    # 方法1：从输出中查找URL
     auth_url=$(echo "$auth_output" | grep -o "https://[^ ]*" | head -1)
     
-    # 方法2：从日志文件中查找
     if [[ -z "$auth_url" ]]; then
         auth_url=$(grep -o "https://[^ ]*" /tmp/cloudflared_auth.log | head -1)
     fi
     
-    # 方法3：显示常用URL格式
     if [[ -z "$auth_url" ]]; then
         print_warning "无法自动提取授权链接"
         print_info "通常授权链接格式为："
@@ -255,13 +238,11 @@ direct_cloudflare_auth() {
     print_input "请在浏览器中完成授权后，按回车键继续..."
     read -r
     
-    # 检查授权是否成功
     local check_count=0
     while [[ $check_count -lt 15 ]]; do
         if [[ -f "/root/.cloudflared/cert.pem" ]]; then
             print_success "✅ 授权成功！检测到证书文件"
             
-            # 检查凭证文件
             local json_file=$(find /root/.cloudflared -name "*.json" -type f | head -1)
             if [[ -n "$json_file" ]]; then
                 print_success "✅ 检测到凭证文件: $(basename "$json_file")"
@@ -282,7 +263,6 @@ direct_cloudflare_auth() {
     echo "  3. 网络连接问题"
     echo ""
     
-    # 显示日志帮助诊断
     if [[ -f "/tmp/cloudflared_auth.log" ]]; then
         print_info "最后10行日志："
         tail -10 /tmp/cloudflared_auth.log
@@ -292,7 +272,6 @@ direct_cloudflare_auth() {
     print_input "按回车键重试授权，或按 Ctrl+C 退出..."
     read -r
     
-    # 清理并重试
     rm -rf /root/.cloudflared 2>/dev/null
     rm -f /tmp/cloudflared_auth.log 2>/dev/null
     direct_cloudflare_auth
@@ -309,7 +288,6 @@ setup_tunnel() {
         exit 1
     fi
     
-    # 检查是否已收集用户信息
     if [[ -z "$USER_DOMAIN" ]]; then
         if [ "$SILENT_MODE" = true ]; then
             USER_DOMAIN="tunnel.example.com"
@@ -321,7 +299,6 @@ setup_tunnel() {
     
     export TUNNEL_ORIGIN_CERT="/root/.cloudflared/cert.pem"
     
-    # 检查是否已存在同名隧道
     local existing_tunnel
     existing_tunnel=$("$BIN_DIR/cloudflared" tunnel list 2>/dev/null | grep "$TUNNEL_NAME" | awk '{print $1}')
     
@@ -341,11 +318,9 @@ setup_tunnel() {
         fi
     fi
     
-    # 绑定域名
     print_info "绑定域名: $USER_DOMAIN"
     "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN" > /dev/null 2>&1
     
-    # 保存配置
     mkdir -p "$CONFIG_DIR"
     cat > "$CONFIG_DIR/tunnel.conf" << EOF
 TUNNEL_ID=$tunnel_id
@@ -364,7 +339,6 @@ EOF
 configure_xray() {
     print_info "配置 Xray..."
     
-    # 生成UUID和端口
     local uuid=$(cat /proc/sys/kernel/random/uuid)
     local port=10000
     
@@ -373,7 +347,6 @@ configure_xray() {
     
     mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     
-    # Xray配置
     cat > "$CONFIG_DIR/xray.json" << EOF
 {
     "log": {"loglevel": "warning"},
@@ -395,7 +368,6 @@ configure_xray() {
 }
 EOF
     
-    # 隧道配置
     local json_file=$(find /root/.cloudflared -name "*.json" -type f | head -1)
     if [[ -z "$json_file" ]]; then
         print_error "找不到隧道凭证文件"
@@ -430,7 +402,6 @@ configure_services() {
     
     chown -R "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     
-    # Xray 服务
     cat > /etc/systemd/system/secure-tunnel-xray.service << EOF
 [Unit]
 Description=Secure Tunnel Xray Service
@@ -450,7 +421,6 @@ StandardError=append:$LOG_DIR/xray-error.log
 WantedBy=multi-user.target
 EOF
     
-    # Argo Tunnel 服务
     cat > /etc/systemd/system/secure-tunnel-argo.service << EOF
 [Unit]
 Description=Secure Tunnel Argo Service
@@ -520,7 +490,6 @@ show_connection_info() {
     print_success "🛣️  路径: /$uuid"
     echo ""
     
-    # VLESS链接
     local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道"
     
     echo "VLESS 链接:"
@@ -543,7 +512,6 @@ show_connection_info() {
 main_install() {
     print_info "开始安装流程..."
     
-    # 1. 系统检查和组件安装（不需要用户输入）
     clear
     echo ""
     echo "╔══════════════════════════════════════════════╗"
@@ -554,20 +522,12 @@ main_install() {
     
     check_system
     install_components
-    
-    # 2. Cloudflare 授权
     direct_cloudflare_auth
-    
-    # 3. 收集用户信息
     collect_user_info
-    
-    # 4. 设置隧道和配置
     setup_tunnel
     configure_xray
     configure_services
     start_services
-    
-    # 5. 显示连接信息
     show_connection_info
     
     echo ""
@@ -628,7 +588,6 @@ show_status() {
 # 主函数
 # ----------------------------
 main() {
-    # 检查静默模式参数
     if [[ "$1" == "-y" ]] || [[ "$2" == "-y" ]]; then
         SILENT_MODE=true
     fi
