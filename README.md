@@ -28,26 +28,14 @@ CDN 加速：享受 Cloudflare 全球 CDN 加速
 自动重连：网络中断后自动重新连接
 
 🚀 快速开始
-1. 下载并运行脚本
 
-# 下载脚本
 
-curl -L https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/argox.sh -o argox.sh
-
-# 添加执行权限
-
-chmod +x secure_tunnel.sh
-
-# 运行脚本（交互式安装）
-
-sudo ./secure_tunnel.sh install
-
-2. 一键安装（下载+授权+安装）
+一键安装（下载+授权+安装）
 
 # 一条命令完成所有操作
 
 curl -L https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/argox.sh -o argox.sh && chmod +x argox.sh && sudo ./argox.sh install
-
+curl -L https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/argox.sh -o argox.sh && chmod +x argox.sh && sudo ./argox.sh menu
 3. 静默安装（使用默认配置）
 
 # 静默安装（无需交互）
