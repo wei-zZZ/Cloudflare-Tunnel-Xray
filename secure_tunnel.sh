@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
 # Cloudflare Tunnel + Xray 安装脚本 (优化版)
-# 版本: 5.1 - 优化流程 + 静默安装
+# 版本: 5.2 - 修复授权链接显示问题
 # ============================================
 
 set -e
@@ -22,6 +22,7 @@ print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
 print_error() { echo -e "${RED}[-]${NC} $1"; }
 print_input() { echo -e "${CYAN}[?]${NC} $1"; }
 print_auth() { echo -e "${GREEN}[🔐]${NC} $1"; }
+print_url() { echo -e "${YELLOW}[🔗]${NC} $1"; }
 
 # ----------------------------
 # 配置变量
@@ -39,7 +40,7 @@ TUNNEL_NAME="secure-tunnel"
 SILENT_MODE=false
 
 # ----------------------------
-# 收集用户信息（优化：在授权前收集）
+# 收集用户信息
 # ----------------------------
 collect_user_info() {
     echo ""
@@ -134,7 +135,7 @@ install_components() {
                 "https://ghproxy.com/https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip"
             )
             local cf_urls=(
-                "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+                "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-armd64"
                 "https://ghproxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
             )
             ;;
@@ -202,7 +203,7 @@ install_components() {
 }
 
 # ----------------------------
-# Cloudflare 授权（优化版）
+# Cloudflare 授权（修复版）
 # ----------------------------
 direct_cloudflare_auth() {
     echo ""
@@ -214,29 +215,87 @@ direct_cloudflare_auth() {
     rm -rf /root/.cloudflared 2>/dev/null
     mkdir -p /root/.cloudflared
     
+    print_auth "正在生成授权链接..."
+    echo ""
     print_auth "请复制以下链接在浏览器中打开完成授权："
     print_auth "---------------------------------------------"
     
-    "$BIN_DIR/cloudflared" tunnel login 2>&1 | grep -o "https://.*" | head -1
+    # 方法1：直接运行并捕获输出
+    print_info "正在运行 cloudflared tunnel login..."
+    echo ""
+    
+    # 运行命令并捕获输出
+    local auth_output
+    auth_output=$("$BIN_DIR/cloudflared" tunnel login 2>&1 | tee /tmp/cloudflared_auth.log)
+    
+    # 尝试多种方法提取URL
+    local auth_url=""
+    
+    # 方法1：从输出中查找URL
+    auth_url=$(echo "$auth_output" | grep -o "https://[^ ]*" | head -1)
+    
+    # 方法2：从日志文件中查找
+    if [[ -z "$auth_url" ]]; then
+        auth_url=$(grep -o "https://[^ ]*" /tmp/cloudflared_auth.log | head -1)
+    fi
+    
+    # 方法3：显示常用URL格式
+    if [[ -z "$auth_url" ]]; then
+        print_warning "无法自动提取授权链接"
+        print_info "通常授权链接格式为："
+        print_url "https://dash.cloudflare.com/argotunnel?callback=https%3A%2F%2F..."
+        echo ""
+        print_input "请查看上方 cloudflared 的输出，手动复制授权链接"
+    else
+        print_url "$auth_url"
+    fi
     
     echo ""
     print_auth "---------------------------------------------"
-    print_input "完成授权后按回车键继续..."
+    print_input "请在浏览器中完成授权后，按回车键继续..."
     read -r
     
-    # 检查授权
+    # 检查授权是否成功
     local check_count=0
-    while [[ $check_count -lt 10 ]]; do
+    while [[ $check_count -lt 15 ]]; do
         if [[ -f "/root/.cloudflared/cert.pem" ]]; then
-            print_success "✅ 授权成功！"
+            print_success "✅ 授权成功！检测到证书文件"
+            
+            # 检查凭证文件
+            local json_file=$(find /root/.cloudflared -name "*.json" -type f | head -1)
+            if [[ -n "$json_file" ]]; then
+                print_success "✅ 检测到凭证文件: $(basename "$json_file")"
+            fi
+            
             return 0
         fi
+        
+        print_info "等待授权完成... ($((check_count*2))秒)"
         sleep 2
         ((check_count++))
     done
     
-    print_error "未检测到授权证书"
-    return 1
+    print_error "❌ 未检测到授权证书"
+    print_info "可能的原因："
+    echo "  1. 未在浏览器中完成授权"
+    echo "  2. 授权链接已过期"
+    echo "  3. 网络连接问题"
+    echo ""
+    
+    # 显示日志帮助诊断
+    if [[ -f "/tmp/cloudflared_auth.log" ]]; then
+        print_info "最后10行日志："
+        tail -10 /tmp/cloudflared_auth.log
+    fi
+    
+    echo ""
+    print_input "按回车键重试授权，或按 Ctrl+C 退出..."
+    read -r
+    
+    # 清理并重试
+    rm -rf /root/.cloudflared 2>/dev/null
+    rm -f /tmp/cloudflared_auth.log 2>/dev/null
+    direct_cloudflare_auth
 }
 
 # ----------------------------
@@ -479,7 +538,7 @@ show_connection_info() {
 }
 
 # ----------------------------
-# 主安装流程（重新排列顺序）
+# 主安装流程
 # ----------------------------
 main_install() {
     print_info "开始安装流程..."
@@ -488,8 +547,8 @@ main_install() {
     clear
     echo ""
     echo "╔══════════════════════════════════════════════╗"
-    echo "║    Cloudflare Tunnel 安装脚本 v5.1          ║"
-    echo "║        优化流程 + 静默安装                  ║"
+    echo "║    Cloudflare Tunnel 安装脚本 v5.2          ║"
+    echo "║        修复授权链接显示问题                 ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
     
@@ -499,7 +558,7 @@ main_install() {
     # 2. Cloudflare 授权
     direct_cloudflare_auth
     
-    # 3. 收集用户信息（现在才收集域名和隧道名）
+    # 3. 收集用户信息
     collect_user_info
     
     # 4. 设置隧道和配置
@@ -592,8 +651,8 @@ main() {
             clear
             echo ""
             echo "╔══════════════════════════════════════════════╗"
-            echo "║    Cloudflare Tunnel 一键安装脚本 v5.1      ║"
-            echo "║        优化流程 + 静默安装                  ║"
+            echo "║    Cloudflare Tunnel 一键安装脚本 v5.2      ║"
+            echo "║        修复授权链接显示问题                 ║"
             echo "╚══════════════════════════════════════════════╝"
             echo ""
             echo "使用方法:"
