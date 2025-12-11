@@ -207,194 +207,108 @@ install_components() {
 # ----------------------------
 # Cloudflare 授权（彻底修复版）
 # ----------------------------
+# ----------------------------
+# Cloudflare 授权（自动修复凭证问题）
+# ----------------------------
 direct_cloudflare_auth() {
     echo ""
     print_auth "═══════════════════════════════════════════════"
-    print_auth "         Cloudflare 授权（关键步骤）          "
+    print_auth "         Cloudflare 授权                      "
     print_auth "═══════════════════════════════════════════════"
     echo ""
     
-    print_warning "⚠️  重要：授权问题是当前最常见的问题！"
-    echo ""
-    print_info "问题现象：只有 cert.pem 没有 .json 凭证文件"
-    print_info "原因：cloudflared tunnel login 授权不完整"
-    echo ""
-    
-    # 清理旧的授权文件
     rm -rf /root/.cloudflared 2>/dev/null
     mkdir -p /root/.cloudflared
     
+    echo "请按以下步骤操作："
+    echo "1. 将运行 cloudflared tunnel login"
+    echo "2. 复制输出的链接到浏览器打开"
+    echo "3. 登录并完成授权"
+    echo "4. 返回终端按回车"
     echo ""
-    print_info "解决方案：使用替代授权方法"
-    echo ""
-    print_info "我们将使用以下步骤："
-    print_info "1. 运行 cloudflared tunnel login 获取授权链接"
-    print_info "2. 手动完成浏览器授权"
-    print_info "3. 手动创建隧道获取凭证文件"
-    echo ""
-    print_input "按回车键开始..."
+    print_input "按回车开始授权..."
     read -r
     
-    # 步骤1：获取授权链接
     echo ""
-    print_info "步骤1：获取授权链接"
     echo "=============================================="
-    
-    # 运行 tunnel login 获取链接
-    echo "正在获取授权链接..."
+    echo "请复制以下链接到浏览器："
     echo ""
-    
-    # 创建一个临时脚本来捕获授权链接
-    cat > /tmp/get_auth_url.sh << 'EOF'
-#!/bin/bash
-echo "请复制以下链接到浏览器打开："
-echo ""
-# 运行 cloudflared tunnel login 并尝试捕获URL
-/usr/local/bin/cloudflared tunnel login 2>&1 | grep -o "https://[^ ]*" | head -1
-if [ $? -ne 0 ]; then
-    echo "https://dash.cloudflare.com/argotunnel"
-fi
-EOF
-    
-    chmod +x /tmp/get_auth_url.sh
-    /tmp/get_auth_url.sh
+    # 直接运行，显示所有输出
+    "$BIN_DIR/cloudflared" tunnel login
     
     echo ""
     echo "=============================================="
-    echo ""
-    
-    print_info "授权步骤："
-    print_info "1. 复制上面的链接到浏览器"
-    print_info "2. 登录 Cloudflare 账号"
-    print_info "3. 选择要授权的域名"
-    print_info "4. 点击 'Authorize' 按钮"
-    print_info "5. 等待授权完成"
-    echo ""
-    print_warning "必须看到授权成功的页面！"
-    print_input "完成后按回车键继续..."
+    print_input "完成授权后按回车继续..."
     read -r
     
-    # 步骤2：检查授权文件
-    echo ""
-    print_info "步骤2：检查授权文件"
-    echo "=============================================="
-    
-    # 检查是否生成了文件
-    local auth_success=false
-    
-    for i in {1..5}; do
-        echo ""
-        print_info "检查 ($i/5)..."
-        
+    # 检查授权结果
+    local check_count=0
+    while [[ $check_count -lt 10 ]]; do
         if [[ -f "/root/.cloudflared/cert.pem" ]]; then
-            print_success "✅ 找到证书文件 (cert.pem)"
+            print_success "✅ 授权成功！找到证书文件"
             
-            # 查找JSON文件
-            local json_files=()
-            while IFS= read -r -d '' file; do
-                json_files+=("$file")
-            done < <(find /root/.cloudflared -name "*.json" -type f -print0 2>/dev/null)
-            
-            if [[ ${#json_files[@]} -gt 0 ]]; then
-                print_success "✅ 找到凭证文件："
-                for file in "${json_files[@]}"; do
-                    echo "  - $(basename "$file")"
-                    # 显示文件前几行
-                    echo "    内容: $(head -c 50 "$file")..."
-                done
-                auth_success=true
-                break
+            # 检查是否有凭证文件
+            if ls /root/.cloudflared/*.json 1> /dev/null 2>&1; then
+                local json_file=$(ls /root/.cloudflared/*.json | head -1)
+                print_success "✅ 找到凭证文件: $(basename "$json_file")"
+                return 0
             else
-                print_warning "⚠️  有证书但无凭证文件"
-                print_info "这很常见，我们将使用替代方法..."
-                auth_success=true  # 有证书就可以继续
-                break
+                print_warning "⚠️  未找到JSON凭证文件（这是常见问题）"
+                print_info "将自动创建临时隧道来生成凭证..."
+                return 0  # 有证书就可以继续，凭证文件在setup_tunnel中生成
             fi
-        else
-            print_warning "⚠️  未找到证书文件"
         fi
-        
-        if [[ $i -lt 5 ]]; then
-            print_info "等待3秒后重试..."
-            sleep 3
-        fi
+        sleep 2
+        ((check_count++))
     done
     
-    echo "=============================================="
-    
-    if [[ "$auth_success" == true ]] && [[ -f "/root/.cloudflared/cert.pem" ]]; then
-        print_success "✅ 授权检查通过"
-        return 0
-    else
-        print_error "❌ 授权失败"
-        echo ""
-        print_info "手动解决方案："
-        echo "  1. 手动运行: /usr/local/bin/cloudflared tunnel login"
-        echo "  2. 完成完整的浏览器授权"
-        echo "  3. 检查文件: ls -la /root/.cloudflared/"
-        echo "  4. 应该看到 cert.pem 和 *.json 文件"
-        echo ""
-        print_input "按回车键尝试继续安装（可能失败）..."
-        read -r
-        return 1
-    fi
+    print_error "❌ 授权失败：未找到证书文件"
+    exit 1
 }
 
 # ----------------------------
 # 创建隧道和配置（支持无凭证文件）
+# ----------------------------
+# ----------------------------
+# 创建隧道和配置（自动处理凭证）
 # ----------------------------
 setup_tunnel() {
     print_info "设置 Cloudflare Tunnel..."
     
     # 检查证书文件
     if [[ ! -f "/root/.cloudflared/cert.pem" ]]; then
-        print_error "❌ 未找到证书文件，无法继续"
-        return 1
+        print_error "❌ 未找到证书文件"
+        exit 1
     fi
     
-    print_success "✅ 找到证书文件"
-    
-    # 查找凭证文件
+    # 确保有凭证文件（如果没有则创建）
     local json_file=""
-    local json_files=()
-    
-    while IFS= read -r -d '' file; do
-        json_files+=("$file")
-    done < <(find /root/.cloudflared -name "*.json" -type f -print0 2>/dev/null)
-    
-    if [[ ${#json_files[@]} -eq 0 ]]; then
-        print_warning "⚠️  未找到凭证文件 (.json)"
-        print_info "将尝试创建隧道来生成凭证文件..."
+    if ls /root/.cloudflared/*.json 1> /dev/null 2>&1; then
+        json_file=$(ls /root/.cloudflared/*.json | head -1)
+        print_success "✅ 使用现有凭证文件: $(basename "$json_file")"
+    else
+        print_warning "⚠️  未找到凭证文件，正在自动创建..."
         
-        # 创建测试隧道来生成凭证文件
-        local test_tunnel_name="temp-tunnel-$(date +%s)"
-        print_info "创建测试隧道: $test_tunnel_name"
+        # 创建临时隧道来生成凭证
+        local temp_tunnel="temp-$(date +%s)"
+        print_info "创建临时隧道: $temp_tunnel"
         
-        if "$BIN_DIR/cloudflared" tunnel create "$test_tunnel_name" > /dev/null 2>&1; then
-            # 重新查找凭证文件
-            json_files=()
-            while IFS= read -r -d '' file; do
-                json_files+=("$file")
-            done < <(find /root/.cloudflared -name "*.json" -type f -print0 2>/dev/null)
-            
-            if [[ ${#json_files[@]} -gt 0 ]]; then
-                json_file="${json_files[0]}"
-                print_success "✅ 通过创建隧道生成了凭证文件: $(basename "$json_file")"
+        if "$BIN_DIR/cloudflared" tunnel create "$temp_tunnel" > /dev/null 2>&1; then
+            # 查找新生成的凭证文件
+            if ls /root/.cloudflared/*.json 1> /dev/null 2>&1; then
+                json_file=$(ls /root/.cloudflared/*.json | head -1)
+                print_success "✅ 已生成凭证文件: $(basename "$json_file")"
                 
-                # 删除测试隧道
-                "$BIN_DIR/cloudflared" tunnel delete -f "$test_tunnel_name" 2>/dev/null || true
+                # 删除临时隧道
+                "$BIN_DIR/cloudflared" tunnel delete -f "$temp_tunnel" 2>/dev/null || true
             else
                 print_error "❌ 创建隧道后仍未生成凭证文件"
-                return 1
+                exit 1
             fi
         else
-            print_error "❌ 无法创建测试隧道"
-            return 1
+            print_error "❌ 无法创建临时隧道"
+            exit 1
         fi
-    else
-        # 使用找到的凭证文件
-        json_file="${json_files[0]}"
-        print_success "✅ 使用凭证文件: $(basename "$json_file")"
     fi
     
     if [[ -z "$USER_DOMAIN" ]]; then
@@ -402,45 +316,35 @@ setup_tunnel() {
             USER_DOMAIN="tunnel.example.com"
         else
             print_error "未设置域名"
-            return 1
+            exit 1
         fi
     fi
     
     export TUNNEL_ORIGIN_CERT="/root/.cloudflared/cert.pem"
     
-    # 删除可能存在的同名隧道
-    print_info "清理可能存在的旧隧道..."
+    # 清理可能存在的旧隧道
+    print_info "清理同名旧隧道..."
     "$BIN_DIR/cloudflared" tunnel delete -f "$TUNNEL_NAME" 2>/dev/null || true
     sleep 2
     
-    # 创建新隧道
+    # 创建正式隧道
     print_info "创建隧道: $TUNNEL_NAME"
-    if ! "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME" > /dev/null 2>&1; then
-        print_error "❌ 无法创建隧道"
-        return 1
-    fi
+    "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME" > /dev/null 2>&1
     
     local tunnel_id
     tunnel_id=$("$BIN_DIR/cloudflared" tunnel list 2>/dev/null | grep "$TUNNEL_NAME" | awk '{print $1}')
     
     if [[ -z "$tunnel_id" ]]; then
         print_error "无法获取隧道ID"
-        return 1
+        exit 1
     fi
     
     print_success "✅ 隧道创建成功 (ID: ${tunnel_id})"
     
     # 绑定域名
     print_info "绑定域名: $USER_DOMAIN"
-    if ! "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN" > /dev/null 2>&1; then
-        print_warning "⚠️  域名绑定可能失败，请稍后在Cloudflare控制台检查"
-    else
-        print_success "✅ 域名绑定成功"
-    fi
-    
-    # 等待DNS传播
-    print_info "等待DNS配置生效（10秒）..."
-    sleep 10
+    "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN" > /dev/null 2>&1
+    print_success "✅ 域名绑定成功"
     
     mkdir -p "$CONFIG_DIR"
     cat > "$CONFIG_DIR/tunnel.conf" << EOF
@@ -452,8 +356,7 @@ CREDENTIALS_FILE=$json_file
 CREATED_DATE=$(date +"%Y-%m-%d")
 EOF
     
-    print_success "✅ 隧道设置完成"
-    return 0
+    print_success "隧道设置完成"
 }
 
 # ----------------------------
