@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
 # Cloudflare Tunnel + Xray 安装脚本
-# 版本: 5.2 - 修复授权链接显示问题
+# 版本: 5.3 - 修复授权显示问题
 # ============================================
 
 set -e
@@ -39,13 +39,15 @@ TUNNEL_NAME="secure-tunnel"
 SILENT_MODE=false
 
 # ----------------------------
-# 收集用户信息
+# 收集用户信息（放回前面）
 # ----------------------------
 collect_user_info() {
+    clear
     echo ""
-    print_info "═══════════════════════════════════════════════"
-    print_info "           配置 Cloudflare Tunnel"
-    print_info "═══════════════════════════════════════════════"
+    echo "╔══════════════════════════════════════════════╗"
+    echo "║    Cloudflare Tunnel 安装脚本 v5.3          ║"
+    echo "║        修复授权显示问题                     ║"
+    echo "╚══════════════════════════════════════════════╝"
     echo ""
     
     if [ "$SILENT_MODE" = true ]; then
@@ -54,6 +56,12 @@ collect_user_info() {
         print_info "隧道名称: $TUNNEL_NAME"
         return
     fi
+    
+    echo ""
+    print_info "═══════════════════════════════════════════════"
+    print_info "           配置 Cloudflare Tunnel"
+    print_info "═══════════════════════════════════════════════"
+    echo ""
     
     while [[ -z "$USER_DOMAIN" ]]; do
         print_input "请输入您的域名 (例如: tunnel.yourdomain.com):"
@@ -193,7 +201,7 @@ install_components() {
 }
 
 # ----------------------------
-# Cloudflare 授权
+# Cloudflare 授权（修复版）
 # ----------------------------
 direct_cloudflare_auth() {
     echo ""
@@ -205,50 +213,83 @@ direct_cloudflare_auth() {
     rm -rf /root/.cloudflared 2>/dev/null
     mkdir -p /root/.cloudflared
     
-    print_auth "正在生成授权链接..."
+    print_auth "请按以下步骤完成授权："
     echo ""
-    print_auth "请复制以下链接在浏览器中打开完成授权："
-    print_auth "---------------------------------------------"
-    
-    print_info "正在运行 cloudflared tunnel login..."
+    print_info "1. 脚本将运行 cloudflared tunnel login"
+    print_info "2. 控制台会显示授权链接"
+    print_info "3. 复制链接到浏览器打开"
+    print_info "4. 在浏览器中选择要授权的域名"
+    print_info "5. 授权成功后返回终端按回车"
     echo ""
-    
-    local auth_output
-    auth_output=$("$BIN_DIR/cloudflared" tunnel login 2>&1 | tee /tmp/cloudflared_auth.log)
-    
-    local auth_url=""
-    auth_url=$(echo "$auth_output" | grep -o "https://[^ ]*" | head -1)
-    
-    if [[ -z "$auth_url" ]]; then
-        auth_url=$(grep -o "https://[^ ]*" /tmp/cloudflared_auth.log | head -1)
-    fi
-    
-    if [[ -z "$auth_url" ]]; then
-        print_warning "无法自动提取授权链接"
-        print_info "通常授权链接格式为："
-        print_url "https://dash.cloudflare.com/argotunnel?callback=https%3A%2F%2F..."
-        echo ""
-        print_input "请查看上方 cloudflared 的输出，手动复制授权链接"
-    else
-        print_url "$auth_url"
-    fi
-    
-    echo ""
-    print_auth "---------------------------------------------"
-    print_input "请在浏览器中完成授权后，按回车键继续..."
+    print_input "按回车键开始授权..."
     read -r
     
+    echo ""
+    print_info "正在运行 cloudflared tunnel login..."
+    echo "=============================================="
+    
+    # 直接运行并显示输出
+    "$BIN_DIR/cloudflared" tunnel login
+    
+    echo "=============================================="
+    echo ""
+    
+    # 检查授权是否成功
     local check_count=0
-    while [[ $check_count -lt 15 ]]; do
+    local max_checks=30
+    
+    while [[ $check_count -lt $max_checks ]]; do
         if [[ -f "/root/.cloudflared/cert.pem" ]]; then
             print_success "✅ 授权成功！检测到证书文件"
             
             local json_file=$(find /root/.cloudflared -name "*.json" -type f | head -1)
             if [[ -n "$json_file" ]]; then
                 print_success "✅ 检测到凭证文件: $(basename "$json_file")"
+                return 0
+            else
+                print_warning "⚠️  未找到凭证文件，但证书已存在"
+                return 0
             fi
+        fi
+        
+        if [[ $check_count -eq 0 ]]; then
+            echo ""
+            print_input "授权完成后，按回车键继续检查..."
+            read -r
+        fi
+        
+        if [[ $check_count -eq 5 ]]; then
+            echo ""
+            print_warning "仍未检测到授权证书，请确认："
+            echo "  1. 是否在浏览器中完成了授权？"
+            echo "  2. 是否选择了正确的域名？"
+            echo "  3. 是否点击了 'Authorize' 按钮？"
+            echo ""
+            print_input "如果已完成授权，按回车键继续等待..."
+            read -r
+        fi
+        
+        if [[ $check_count -eq 15 ]]; then
+            echo ""
+            print_error "长时间未检测到授权证书"
+            echo ""
+            print_info "请手动检查："
+            echo "  1. 重新运行: sudo $BIN_DIR/cloudflared tunnel login"
+            echo "  2. 查看文件: ls -la /root/.cloudflared/"
+            echo ""
+            print_input "按回车键重新尝试授权..."
+            read -r
             
-            return 0
+            rm -rf /root/.cloudflared 2>/dev/null
+            mkdir -p /root/.cloudflared
+            
+            echo ""
+            print_info "重新运行授权..."
+            "$BIN_DIR/cloudflared" tunnel login
+            echo ""
+            
+            check_count=0
+            continue
         fi
         
         print_info "等待授权完成... ($((check_count*2))秒)"
@@ -256,25 +297,17 @@ direct_cloudflare_auth() {
         ((check_count++))
     done
     
-    print_error "❌ 未检测到授权证书"
-    print_info "可能的原因："
-    echo "  1. 未在浏览器中完成授权"
-    echo "  2. 授权链接已过期"
-    echo "  3. 网络连接问题"
+    print_error "❌ 授权失败"
     echo ""
-    
-    if [[ -f "/tmp/cloudflared_auth.log" ]]; then
-        print_info "最后10行日志："
-        tail -10 /tmp/cloudflared_auth.log
-    fi
-    
+    print_info "请尝试以下方法："
+    echo "  1. 手动运行: sudo $BIN_DIR/cloudflared tunnel login"
+    echo "  2. 确保使用正确的 Cloudflare 账号"
+    echo "  3. 确保域名已在 Cloudflare 管理"
+    echo "  4. 检查网络连接"
     echo ""
-    print_input "按回车键重试授权，或按 Ctrl+C 退出..."
+    print_input "按回车键退出脚本，手动完成授权后再运行..."
     read -r
-    
-    rm -rf /root/.cloudflared 2>/dev/null
-    rm -f /tmp/cloudflared_auth.log 2>/dev/null
-    direct_cloudflare_auth
+    exit 1
 }
 
 # ----------------------------
@@ -292,7 +325,7 @@ setup_tunnel() {
         if [ "$SILENT_MODE" = true ]; then
             USER_DOMAIN="tunnel.example.com"
         else
-            print_error "未设置域名，请重新运行脚本"
+            print_error "未设置域名"
             exit 1
         fi
     fi
@@ -512,18 +545,10 @@ show_connection_info() {
 main_install() {
     print_info "开始安装流程..."
     
-    clear
-    echo ""
-    echo "╔══════════════════════════════════════════════╗"
-    echo "║    Cloudflare Tunnel 安装脚本 v5.2          ║"
-    echo "║        修复授权链接显示问题                 ║"
-    echo "╚══════════════════════════════════════════════╝"
-    echo ""
-    
     check_system
     install_components
-    direct_cloudflare_auth
     collect_user_info
+    direct_cloudflare_auth
     setup_tunnel
     configure_xray
     configure_services
@@ -592,6 +617,8 @@ main() {
         SILENT_MODE=true
     fi
     
+    clear
+    
     case "${1:-}" in
         "install")
             main_install
@@ -607,11 +634,10 @@ main() {
             main_install
             ;;
         *)
-            clear
             echo ""
             echo "╔══════════════════════════════════════════════╗"
-            echo "║    Cloudflare Tunnel 一键安装脚本 v5.2      ║"
-            echo "║        修复授权链接显示问题                 ║"
+            echo "║    Cloudflare Tunnel 安装脚本 v5.3          ║"
+            echo "║        修复授权显示问题                     ║"
             echo "╚══════════════════════════════════════════════╝"
             echo ""
             echo "使用方法:"
