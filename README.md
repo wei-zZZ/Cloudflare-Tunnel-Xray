@@ -29,10 +29,23 @@ Cloudflare 账户: 需要拥有一个域名并托管在 Cloudflare
 
 🚀 快速开始
 
-1.下载脚本
-2.一键安装
+安装步骤：
+1. 下载脚本
+# 方法1：从GitHub下载
 ```bash
-bash -c "$(wget -qO- https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/secure_tunnel.sh)" -- install
+
+wget https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/4de04c8df4b70b224eb719d7a066c24a65173e3e/secure_tunnel.sh
+```
+# 方法2：克隆整个仓库
+git clone https://github.com/wei-zZZ/Cloudflare-Tunnel-Xray.git
+cd Cloudflare-Tunnel-Xray
+2. 给脚本执行权限
+```bash
+chmod +x secure_tunnel.sh
+```
+3. 运行安装
+```bash
+sudo ./secure_tunnel.sh install
 ```
 3. 按照提示操作
 脚本将引导您完成以下步骤：
