@@ -37,8 +37,10 @@ Cloudflare 账户: 需要拥有一个域名并托管在 Cloudflare
 wget https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/4de04c8df4b70b224eb719d7a066c24a65173e3e/secure_tunnel.sh
 ```
 # 方法2：克隆整个仓库
+```bash
 git clone https://github.com/wei-zZZ/Cloudflare-Tunnel-Xray.git
 cd Cloudflare-Tunnel-Xray
+```
 2. 给脚本执行权限
 ```bash
 chmod +x secure_tunnel.sh
