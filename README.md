@@ -2,6 +2,7 @@
 
 
 项目简介
+
 这是一个自动化部署 Cloudflare Tunnel 与 Xray-core 的 Bash 脚本，能够快速搭建一个基于 Cloudflare Argo Tunnel 的安全代理隧道。该脚本实现了免端口暴露、自动 SSL 证书签发和 WebSocket 代理功能。
 
 功能特性
@@ -17,6 +18,7 @@
 ✅ 配置管理 - 提供状态检查、重启、重新授权等管理功能
 
 系统要求
+
 操作系统: Ubuntu/Debian/CentOS 等主流 Linux 发行版
 
 权限: Root 用户权限
@@ -45,7 +47,7 @@ bash -c "$(wget -qO- https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel
 
 详细使用方法
 安装命令
-bash
+
 # 完整安装
 sudo ./secure_tunnel.sh install
 
@@ -63,9 +65,10 @@ sudo ./secure_tunnel.sh auth
 
 # 完全卸载
 sudo ./secure_tunnel.sh uninstall
+
 安装后配置
 1. 客户端配置
-安装完成后，脚本会显示以下连接信息：
+2. 安装完成后，脚本会显示以下连接信息：
 
 VLESS 链接: 可直接导入支持 VLESS 协议的客户端
 
@@ -96,8 +99,9 @@ TLS: 启用
 
 文件结构
 text
+```bash
 /root/.cloudflared/
-├── cert.pem              # Cloudflare 证书
+├── cert.pem             # Cloudflare 证书
 └── *.json               # 隧道凭证文件
 
 /etc/secure_tunnel/
@@ -113,10 +117,12 @@ text
 
 /usr/local/bin/
 ├── xray                # Xray 核心程序
-└── cloudflared         # Cloudflare Tunnel 客户端
+└── cloudflared         # Cloudflare
+```
+Tunnel 客户端
 服务管理
 启动/停止服务
-bash
+```bash
 # 启动所有服务
 systemctl start secure-tunnel-xray.service secure-tunnel-argo.service
 
@@ -128,8 +134,9 @@ systemctl status secure-tunnel-xray.service secure-tunnel-argo.service
 
 # 启用开机自启
 systemctl enable secure-tunnel-xray.service secure-tunnel-argo.service
+```
 日志查看
-bash
+```bash
 # 查看 Xray 日志
 journalctl -u secure-tunnel-xray.service -f
 
@@ -138,6 +145,7 @@ journalctl -u secure-tunnel-argo.service -f
 
 # 查看错误日志
 tail -f /var/log/secure_tunnel/*error.log
+```
 故障排除
 常见问题
 授权失败
@@ -171,7 +179,7 @@ tail -f /var/log/secure_tunnel/*error.log
 检查证书有效期
 
 诊断命令
-bash
+```bash
 # 显示完整状态
 sudo ./secure_tunnel.sh status
 
@@ -183,9 +191,10 @@ ps aux | grep -E "(xray|cloudflared)"
 
 # 测试本地端口
 curl -I http://localhost:10000
+```
 更新与维护
 手动更新组件
-bash
+```bash
 # 更新 Xray
 wget -O /tmp/xray.zip "最新版本下载链接"
 unzip -o /tmp/xray.zip -d /tmp
@@ -196,11 +205,13 @@ systemctl restart secure-tunnel-xray.service
 wget -O /usr/local/bin/cloudflared "最新版本下载链接"
 chmod +x /usr/local/bin/cloudflared
 systemctl restart secure-tunnel-argo.service
+```
 备份配置
-bash
+```bash
 # 备份重要文件
 cp -r /etc/secure_tunnel ~/secure_tunnel_backup
 cp -r /root/.cloudflared ~/cloudflared_backup
+```
 安全建议
 定期更新
 
