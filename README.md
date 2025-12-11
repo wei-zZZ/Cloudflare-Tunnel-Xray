@@ -33,9 +33,7 @@ CDN 加速：享受 Cloudflare 全球 CDN 加速
 一键安装（下载+授权+安装）
 
 # 一条命令完成所有操作
-```
-curl -L https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/argox.sh -o argox.sh && chmod +x argox.sh && sudo ./argox.sh install
-```
+
 ```
 curl -L https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/argox.sh -o argox.sh && chmod +x argox.sh && sudo ./argox.sh menu
 ```
