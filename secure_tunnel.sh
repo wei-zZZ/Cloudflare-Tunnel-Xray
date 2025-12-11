@@ -953,6 +953,53 @@ PYTHON_EOF
 # ----------------------------
 # 停止本地订阅服务器
 # ----------------------------
+stop_subscription_server() {
+    print_info "停止订阅服务器..."
+    
+    local SUB_DIR="$CONFIG_DIR/subscription"
+    local pid_file="$SUB_DIR/server.pid"
+    
+    if [[ -f "$pid_file" ]]; then
+        local pid=$(cat "$pid_file")
+        print_info "找到服务器进程 PID: $pid"
+        
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid"
+            sleep 2
+            
+            if kill -0 "$pid" 2>/dev/null; then
+                print_warning "进程未正常退出，强制终止..."
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+            
+            print_success "✅ 订阅服务器已停止"
+        else
+            print_warning "⚠️ 进程 $pid 已不存在"
+        fi
+        
+        rm -f "$pid_file"
+    else
+        print_info "未找到PID文件，尝试查找并停止相关进程..."
+    fi
+    
+    # 清理所有相关的Python进程
+    local pids=$(pgrep -f "server.py" 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+        print_info "清理残留进程..."
+        for pid in $pids; do
+            kill "$pid" 2>/dev/null || true
+        done
+        sleep 1
+        pkill -f "server.py" 2>/dev/null && print_info "清理完成"
+    fi
+    
+    # 检查端口是否释放
+    if ss -tulpn | grep ":8080" >/dev/null; then
+        print_warning "端口 8080 仍被占用"
+    else
+        print_success "端口 8080 已释放"
+    fi
+}
 # ----------------------------
 # 调试订阅服务器
 # ----------------------------
