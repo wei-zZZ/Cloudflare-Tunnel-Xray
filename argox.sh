@@ -289,26 +289,29 @@ setup_tunnel() {
     else
         print_warning "⚠️  未找到凭证文件，正在自动创建..."
         
-        # 创建临时隧道来生成凭证
-        local temp_tunnel="temp-$(date +%s)"
-        print_info "创建临时隧道: $temp_tunnel"
+# 创建临时隧道来生成凭证
+local temp_tunnel="temp-$(date +%s)"
+print_info "创建临时隧道: $temp_tunnel (这可能需要几秒钟...)"
+if timeout 30 "$BIN_DIR/cloudflared" tunnel create "$temp_tunnel"; then
+    # 查找新生成的凭证文件
+    sleep 2  # 稍等确保文件写入
+    if ls /root/.cloudflared/*.json 1> /dev/null 2>&1; then
+        # 找到最新的那个 .json 文件
+        json_file=$(ls -t /root/.cloudflared/*.json | head -1)
+        print_success "✅ 已生成凭证文件: $(basename \"$json_file\")"
         
-        if "$BIN_DIR/cloudflared" tunnel create "$temp_tunnel" > /dev/null 2>&1; then
-            # 查找新生成的凭证文件
-            if ls /root/.cloudflared/*.json 1> /dev/null 2>&1; then
-                json_file=$(ls /root/.cloudflared/*.json | head -1)
-                print_success "✅ 已生成凭证文件: $(basename "$json_file")"
-                
-                # 删除临时隧道
-                "$BIN_DIR/cloudflared" tunnel delete -f "$temp_tunnel" 2>/dev/null || true
-            else
-                print_error "❌ 创建隧道后仍未生成凭证文件"
-                exit 1
-            fi
-        else
-            print_error "❌ 无法创建临时隧道"
-            exit 1
-        fi
+        # 删除临时隧道
+        print_info "清理临时隧道: $temp_tunnel"
+        "$BIN_DIR/cloudflared" tunnel delete -f "$temp_tunnel" 2>/dev/null || true
+    else
+        print_error "❌ 创建隧道后仍未生成凭证文件"
+        exit 1
+    fi
+else
+    print_error "❌ 无法创建临时隧道 (命令执行失败或超时)"
+    print_info "提示：手动运行 'cloudflared tunnel create test' 可以测试功能"
+    exit 1
+fi
     fi
     
     if [[ -z "$USER_DOMAIN" ]]; then
