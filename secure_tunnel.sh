@@ -676,58 +676,137 @@ show_connection_info() {
 start_subscription_server() {
     print_info "启动本地订阅服务器..."
     
+    # 首先停止可能已经在运行的服务
+    stop_subscription_server
+    
     local SUB_DIR="$CONFIG_DIR/subscription"
+    
+    # 创建订阅目录
     if [[ ! -d "$SUB_DIR" ]]; then
         print_info "创建订阅目录..."
         mkdir -p "$SUB_DIR"
-        
-        # 读取配置生成订阅
-        if [[ -f "$CONFIG_DIR/tunnel.conf" ]]; then
-            local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-            local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-            
-            if [[ -n "$domain" && -n "$uuid" ]]; then
-                local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道"
-                local vless_non_tls="vless://${uuid}@${domain}:80?encryption=none&security=none&type=ws&host=${domain}&path=%2F${uuid}#安全隧道-非TLS"
-                
-                echo "$vless_tls" > "$SUB_DIR/vless_tls.txt"
-                echo "$vless_non_tls" > "$SUB_DIR/vless_non_tls.txt"
-                
-                local combined_links="${vless_tls}\n${vless_non_tls}"
-                local base64_sub=$(echo -e "$combined_links" | base64 -w 0)
-                echo "$base64_sub" > "$SUB_DIR/base64.txt"
-            fi
-        fi
     fi
     
-    # 检查是否已安装Python
+    # 确保有配置文件
+    if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
+        print_error "错误：未找到配置文件 $CONFIG_DIR/tunnel.conf"
+        print_error "请先运行安装命令：sudo ./secure_tunnel.sh install"
+        return 1
+    fi
+    
+    # 读取配置信息
+    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    
+    if [[ -z "$domain" ]] || [[ -z "$uuid" ]]; then
+        print_error "无法读取域名或UUID，请检查配置文件"
+        return 1
+    fi
+    
+    print_success "读取配置成功"
+    print_info "域名: $domain"
+    print_info "UUID: $uuid"
+    
+    # 生成订阅内容
+    local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道"
+    local vless_non_tls="vless://${uuid}@${domain}:80?encryption=none&security=none&type=ws&host=${domain}&path=%2F${uuid}#安全隧道-非TLS"
+    
+    # 生成base64订阅
+    local combined_links="${vless_tls}\n${vless_non_tls}"
+    local base64_sub=$(echo -e "$combined_links" | base64 -w 0)
+    
+    # 保存到文件
+    echo "$vless_tls" > "$SUB_DIR/vless_tls.txt"
+    echo "$vless_non_tls" > "$SUB_DIR/vless_non_tls.txt"
+    echo "$base64_sub" > "$SUB_DIR/base64.txt"
+    
+    print_success "✅ 订阅文件已生成"
+    
+    # 检查Python3是否可用
     if ! command -v python3 &> /dev/null; then
         print_info "安装Python3..."
-        apt-get update && apt-get install -y python3
+        apt-get update && apt-get install -y python3 python3-pip
     fi
     
-    # 检查端口是否被占用（使用Bash方式）
+    # 检查端口是否被占用
     if ss -tulpn | grep ":8080" >/dev/null; then
-        print_warning "端口 8080 已被占用，尝试停止现有服务..."
+        print_warning "端口 8080 已被占用，正在释放..."
         pkill -f "server.py" 2>/dev/null || true
         sleep 2
     fi
     
-    # 创建简单的HTTP服务器脚本
+    # 创建更稳定的HTTP服务器脚本
     cat > "$SUB_DIR/server.py" << 'PYTHON_EOF'
 #!/usr/bin/env python3
 import http.server
 import socketserver
 import os
-import base64
+import sys
 import time
+from urllib.parse import urlparse
 
 PORT = 8080
 SUB_DIR = os.path.dirname(os.path.abspath(__file__))
 
 class SubscriptionHandler(http.server.SimpleHTTPRequestHandler):
+    
     def do_GET(self):
-        if self.path == '/sub':
+        parsed_path = urlparse(self.path)
+        path = parsed_path.path
+        
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 访问路径: {path}")
+        
+        if path == '/':
+            # 显示欢迎页面
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.end_headers()
+            html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <title>订阅服务器</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 40px; }
+                    .container { max-width: 800px; margin: 0 auto; }
+                    h1 { color: #333; }
+                    .link { background: #f5f5f5; padding: 15px; margin: 10px 0; border-radius: 5px; }
+                    .btn { display: inline-block; padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 5px; }
+                    .btn:hover { background: #0056b3; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>📡 订阅服务器</h1>
+                    <p>请选择您需要的订阅格式：</p>
+                    
+                    <div class="link">
+                        <h3>📋 通用订阅 (Base64)</h3>
+                        <p>适用于 V2rayN/NekoBox 等客户端</p>
+                        <a class="btn" href="/sub">获取订阅链接</a>
+                        <a class="btn" href="/base64.txt" download>下载文件</a>
+                    </div>
+                    
+                    <div class="link">
+                        <h3>🔗 VLESS 链接</h3>
+                        <p>单个VLESS配置链接</p>
+                        <a class="btn" href="/vless">获取VLESS链接</a>
+                        <a class="btn" href="/vless_tls.txt" download>下载文件</a>
+                    </div>
+                    
+                    <div class="link">
+                        <h3>📁 文件列表</h3>
+                        <p>查看所有可用文件</p>
+                        <a class="btn" href="/list">查看文件</a>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            self.wfile.write(html.encode('utf-8'))
+            
+        elif path == '/sub':
             # 通用订阅
             base64_file = os.path.join(SUB_DIR, 'base64.txt')
             if os.path.exists(base64_file):
@@ -736,12 +815,15 @@ class SubscriptionHandler(http.server.SimpleHTTPRequestHandler):
                 
                 self.send_response(200)
                 self.send_header('Content-type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Disposition', 'attachment; filename="subscription.txt"')
                 self.send_header('Subscription-Userinfo', 'upload=0; download=0; total=10737418240000000; expire=2546246231')
                 self.end_headers()
-                self.wfile.write(encoded.encode())
-                return
-        
-        elif self.path == '/vless':
+                self.wfile.write(encoded.encode('utf-8'))
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 发送订阅内容，长度: {len(encoded)}")
+            else:
+                self.send_error(404, "File not found: base64.txt")
+                
+        elif path == '/vless':
             # VLESS链接
             vless_file = os.path.join(SUB_DIR, 'vless_tls.txt')
             if os.path.exists(vless_file):
@@ -750,84 +832,226 @@ class SubscriptionHandler(http.server.SimpleHTTPRequestHandler):
                 
                 self.send_response(200)
                 self.send_header('Content-type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Disposition', 'attachment; filename="vless.txt"')
                 self.end_headers()
-                self.wfile.write(content.encode())
-                return
-        
-        # 默认显示文件列表
-        self.directory = SUB_DIR
-        return super().do_GET()
-    
+                self.wfile.write(content.encode('utf-8'))
+            else:
+                self.send_error(404, "File not found: vless_tls.txt")
+                
+        elif path == '/list':
+            # 文件列表
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.end_headers()
+            
+            files = os.listdir(SUB_DIR)
+            html = f"<h1>文件列表</h1><ul>"
+            for file in files:
+                if os.path.isfile(os.path.join(SUB_DIR, file)):
+                    html += f'<li><a href="/{file}">{file}</a></li>'
+            html += "</ul>"
+            self.wfile.write(html.encode('utf-8'))
+            
+        else:
+            # 静态文件服务
+            file_path = os.path.join(SUB_DIR, path.lstrip('/'))
+            if os.path.exists(file_path) and os.path.isfile(file_path):
+                self.directory = SUB_DIR
+                super().do_GET()
+            else:
+                self.send_error(404, "File not found")
+
     def log_message(self, format, *args):
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {args[0]} - {args[1]}")
+        # 禁用默认日志
+        pass
 
 if __name__ == '__main__':
+    # 设置工作目录
     os.chdir(SUB_DIR)
-    with socketserver.TCPServer(("", PORT), SubscriptionHandler) as httpd:
-        print(f"订阅服务器运行在: http://0.0.0.0:{PORT}")
-        print("可用链接:")
-        print(f"  通用订阅: http://0.0.0.0:{PORT}/sub")
-        print(f"  VLESS链接: http://0.0.0.0:{PORT}/vless")
-        print("\n按 Ctrl+C 停止服务器")
-        httpd.serve_forever()
+    
+    try:
+        with socketserver.TCPServer(("", PORT), SubscriptionHandler) as httpd:
+            print(f"=" * 50)
+            print(f"订阅服务器已启动!")
+            print(f"=" * 50)
+            print(f"服务器地址: http://0.0.0.0:{PORT}")
+            print(f"可用链接:")
+            print(f"  1. 首页: http://0.0.0.0:{PORT}/")
+            print(f"  2. 通用订阅: http://0.0.0.0:{PORT}/sub")
+            print(f"  3. VLESS链接: http://0.0.0.0:{PORT}/vless")
+            print(f"  4. 文件列表: http://0.0.0.0:{PORT}/list")
+            print(f"=" * 50)
+            print("按 Ctrl+C 停止服务器")
+            print(f"=" * 50)
+            
+            httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n服务器已停止")
+    except Exception as e:
+        print(f"服务器错误: {e}")
+        sys.exit(1)
 PYTHON_EOF
     
+    # 设置权限
     chmod +x "$SUB_DIR/server.py"
     
-    # 启动服务器（后台运行）
+    # 确保在正确目录启动
     cd "$SUB_DIR"
+    
+    # 启动服务器（后台运行）
+    print_info "启动订阅服务器..."
     nohup python3 server.py > "$SUB_DIR/server.log" 2>&1 &
     
     local server_pid=$!
     echo "$server_pid" > "$SUB_DIR/server.pid"
     
-    sleep 2
+    sleep 3
     
-    # 获取服务器IP
-    local server_ip=$(hostname -I | awk '{print $1}' | head -1)
-    if [ -z "$server_ip" ]; then
-        server_ip="0.0.0.0"
+    # 检查服务器是否启动成功
+    if kill -0 "$server_pid" 2>/dev/null; then
+        # 获取服务器IP
+        local server_ip=$(hostname -I | awk '{print $1}' | head -1)
+        if [ -z "$server_ip" ]; then
+            server_ip="127.0.0.1"
+        fi
+        
+        print_success "✅ 订阅服务器启动成功！"
+        echo ""
+        print_info "🌐 访问地址:"
+        echo "  http://${server_ip}:8080"
+        echo ""
+        print_info "📡 重要链接:"
+        echo "  通用订阅: http://${server_ip}:8080/sub"
+        echo "  VLESS链接: http://${server_ip}:8080/vless"
+        echo "  文件列表: http://${server_ip}:8080/list"
+        echo ""
+        print_info "📋 使用方法:"
+        echo "  1. 在客户端中导入: http://${server_ip}:8080/sub"
+        echo "  2. 或在浏览器中访问上面的链接获取配置"
+        echo ""
+        print_info "📊 服务器状态:"
+        echo "  PID: $server_pid"
+        echo "  日志: $SUB_DIR/server.log"
+        echo "  配置文件: $SUB_DIR/"
+        
+        # 测试服务器是否响应
+        print_info "测试服务器响应..."
+        if curl -s "http://${server_ip}:8080/" > /dev/null 2>&1; then
+            print_success "✅ 服务器响应正常"
+        else
+            print_warning "⚠️ 服务器启动但无法访问，请检查防火墙"
+            echo "  检查命令: sudo ufw allow 8080/tcp"
+        fi
+    else
+        print_error "❌ 服务器启动失败"
+        print_info "查看错误日志:"
+        tail -20 "$SUB_DIR/server.log"
+        return 1
     fi
-    
-    print_success "✅ 订阅服务器已启动！"
-    echo ""
-    print_info "🌐 服务器地址: http://${server_ip}:8080"
-    print_info "📡 订阅链接: http://${server_ip}:8080/sub"
-    print_info "🔗 VLESS链接: http://${server_ip}:8080/vless"
-    echo ""
-    print_info "📋 使用方法:"
-    echo "  1. 在V2rayN/NekoBox客户端中导入:"
-    echo "     http://${server_ip}:8080/sub"
-    echo "  2. 或者复制VLESS链接手动配置"
-    echo ""
-    print_info "🛠️  管理命令:"
-    echo "  查看日志: tail -f $SUB_DIR/server.log"
-    echo "  停止服务器: sudo ./secure_tunnel.sh stop-server"
-    echo "  服务器PID: $server_pid"
 }
 
 # ----------------------------
 # 停止本地订阅服务器
 # ----------------------------
-stop_subscription_server() {
-    local SUB_DIR="$CONFIG_DIR/subscription"
-    local pid_file="$SUB_DIR/server.pid"
+# ----------------------------
+# 调试订阅服务器
+# ----------------------------
+debug_subscription() {
+    print_info "═══════════════════════════════════════════════"
+    print_info "           调试订阅服务器"
+    print_info "═══════════════════════════════════════════════"
+    echo ""
     
-    if [[ -f "$pid_file" ]]; then
-        local pid=$(cat "$pid_file")
-        if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid"
-            print_success "✅ 订阅服务器已停止 (PID: $pid)"
-        else
-            print_warning "⚠️ 服务器进程不存在"
-        fi
-        rm -f "$pid_file"
-    else
-        print_warning "⚠️ 未找到服务器PID文件"
+    # 检查安装状态
+    if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
+        print_error "未安装，请先运行: sudo ./secure_tunnel.sh install"
+        return 1
     fi
     
-    # 确保没有残留的Python服务器进程
-    pkill -f "server.py" 2>/dev/null && print_info "清理残留进程..."
+    # 读取配置
+    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    
+    print_info "当前配置:"
+    echo "  域名: ${domain:-未设置}"
+    echo "  UUID: ${uuid:-未设置}"
+    echo ""
+    
+    # 检查订阅目录
+    local SUB_DIR="$CONFIG_DIR/subscription"
+    print_info "订阅目录状态: $SUB_DIR"
+    if [[ -d "$SUB_DIR" ]]; then
+        ls -la "$SUB_DIR/"
+        echo ""
+        
+        # 检查订阅文件
+        if [[ -f "$SUB_DIR/base64.txt" ]]; then
+            print_success "✅ 找到订阅文件"
+            echo "文件大小: $(wc -c < "$SUB_DIR/base64.txt") bytes"
+            echo "前100字符: $(head -c 100 "$SUB_DIR/base64.txt")..."
+        else
+            print_error "❌ 未找到订阅文件"
+        fi
+    else
+        print_error "❌ 订阅目录不存在"
+    fi
+    
+    echo ""
+    
+    # 检查服务器进程
+    local pid_file="$SUB_DIR/server.pid"
+    if [[ -f "$pid_file" ]]; then
+        local pid=$(cat "$pid_file")
+        print_info "服务器进程: PID $pid"
+        
+        if kill -0 "$pid" 2>/dev/null; then
+            print_success "✅ 服务器正在运行"
+            
+            # 检查端口
+            if ss -tulpn | grep ":8080" | grep "$pid" >/dev/null; then
+                print_success "✅ 端口 8080 被正确占用"
+            else
+                print_error "❌ 端口 8080 未被占用"
+            fi
+            
+            # 测试访问
+            local server_ip=$(hostname -I | awk '{print $1}' | head -1)
+            if [[ -n "$server_ip" ]]; then
+                print_info "测试访问 http://${server_ip}:8080/ ..."
+                if curl -s -o /dev/null -w "%{http_code}" "http://${server_ip}:8080/" | grep -q "200"; then
+                    print_success "✅ 服务器可访问 (HTTP 200)"
+                else
+                    print_error "❌ 服务器无法访问"
+                fi
+            fi
+        else
+            print_error "❌ 服务器进程不存在"
+        fi
+    else
+        print_info "服务器未运行"
+        echo "启动命令: sudo ./secure_tunnel.sh start-server"
+    fi
+    
+    echo ""
+    print_info "防火墙状态:"
+    if command -v ufw &> /dev/null; then
+        ufw status | grep "8080" || echo "  端口8080未在防火墙规则中"
+    else
+        echo "  UFW未安装"
+    fi
+    
+    echo ""
+    print_info "网络连接测试:"
+    netstat -tlnp | grep ":8080" || echo "  无8080端口监听"
+    
+    echo ""
+    print_info "日志文件:"
+    if [[ -f "$SUB_DIR/server.log" ]]; then
+        echo "最后10行日志:"
+        tail -10 "$SUB_DIR/server.log"
+    else
+        echo "  无日志文件"
+    fi
 }
 
 # ----------------------------
@@ -945,12 +1169,16 @@ main() {
     "subscription")
         show_subscription
         ;;
+    "debug-sub")
+        debug_subscription
+        ;;
     *)
         echo "使用方法:"
         echo "  sudo ./secure_tunnel.sh install         # 安装"
         echo "  sudo ./secure_tunnel.sh start-server    # 启动订阅服务器"
         echo "  sudo ./secure_tunnel.sh stop-server     # 停止订阅服务器"
         echo "  sudo ./secure_tunnel.sh subscription    # 显示订阅链接"
+        echo "  sudo ./secure_tunnel.sh debug-sub       # 调试订阅服务器"
         exit 1
         ;;
     esac
