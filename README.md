@@ -29,23 +29,31 @@ CDN 加速：享受 Cloudflare 全球 CDN 加速
 
 🚀 快速开始
 1. 下载并运行脚本
-bash
+
 # 下载脚本
+
 curl -L https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/secure_tunnel.sh -o secure_tunnel.sh
 
 # 添加执行权限
+
 chmod +x secure_tunnel.sh
 
 # 运行脚本（交互式安装）
+
 sudo ./secure_tunnel.sh install
+
 2. 一键安装（下载+授权+安装）
-bash
+
 # 一条命令完成所有操作
+
 curl -L https://raw.githubusercontent.com/your-repo/secure_tunnel.sh -o secure_tunnel.sh && chmod +x secure_tunnel.sh && sudo ./secure_tunnel.sh install
+
 3. 静默安装（使用默认配置）
-bash
+
 # 静默安装（无需交互）
+
 sudo ./secure_tunnel.sh -y
+
 📝 安装流程
 步骤 1：系统检查
 脚本会自动检查：
