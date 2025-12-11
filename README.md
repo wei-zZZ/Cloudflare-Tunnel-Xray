@@ -1,4 +1,5 @@
 Cloudflare Tunnel + Xray 一键安装脚本
+
 📋 功能介绍
 这是一个全自动的 Cloudflare Tunnel + Xray 安装脚本，主要功能包括：
 
@@ -30,7 +31,7 @@ CDN 加速：享受 Cloudflare 全球 CDN 加速
 1. 下载并运行脚本
 bash
 # 下载脚本
-curl -L https://raw.githubusercontent.com/your-repo/secure_tunnel.sh -o secure_tunnel.sh
+curl -L https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/secure_tunnel.sh -o secure_tunnel.sh
 
 # 添加执行权限
 chmod +x secure_tunnel.sh
