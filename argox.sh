@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
 # Cloudflare Tunnel + Xray 安装脚本
-# 版本: 6.1 - 彻底修复授权问题
+# 版本: 6.1 - 修复版
 # ============================================
 
 set -e
@@ -45,9 +45,44 @@ show_title() {
     echo ""
     echo "╔══════════════════════════════════════════════╗"
     echo "║    Cloudflare Tunnel + Xray 管理脚本        ║"
-    echo "║             版本: 6.1                       ║"
+    echo "║             版本: 6.1 - 修复版              ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
+}
+
+# ----------------------------
+# 修复软件源问题
+# ----------------------------
+fix_apt_sources() {
+    print_info "检查软件源配置..."
+    
+    # 备份原有源
+    cp /etc/apt/sources.list /etc/apt/sources.list.backup 2>/dev/null || true
+    
+    # 检测系统类型
+    if grep -q "debian" /etc/os-release; then
+        print_info "检测到 Debian 系统，修复软件源..."
+        cat > /etc/apt/sources.list << EOF
+deb http://deb.debian.org/debian bullseye main contrib non-free
+deb http://deb.debian.org/debian bullseye-updates main contrib non-free
+deb http://security.debian.org/debian-security bullseye-security main contrib non-free
+EOF
+    elif grep -q "ubuntu" /etc/os-release; then
+        print_info "检测到 Ubuntu 系统，修复软件源..."
+        cat > /etc/apt/sources.list << EOF
+deb http://archive.ubuntu.com/ubuntu focal main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu focal-updates main restricted universe multiverse
+deb http://security.ubuntu.com/ubuntu focal-security main restricted universe multiverse
+EOF
+    fi
+    
+    # 清除问题源
+    rm -f /etc/apt/sources.list.d/*bullseye-backports* 2>/dev/null || true
+    
+    # 更新软件包列表
+    apt-get update -y || {
+        print_warning "软件源更新失败，尝试继续安装..."
+    }
 }
 
 # ----------------------------
@@ -91,7 +126,7 @@ collect_user_info() {
 }
 
 # ----------------------------
-# 系统检查
+# 系统检查（修复版）
 # ----------------------------
 check_system() {
     print_info "检查系统环境..."
@@ -101,22 +136,95 @@ check_system() {
         exit 1
     fi
     
-    local required_tools=("curl" "unzip" "wget")
-    for tool in "${required_tools[@]}"; do
+    # 修复软件源
+    fix_apt_sources
+    
+    # 安装必要工具
+    print_info "安装必要工具..."
+    
+    local tools=("curl" "wget" "unzip")
+    for tool in "${tools[@]}"; do
         if ! command -v "$tool" &> /dev/null; then
-            print_info "安装 $tool..."
-            apt-get update -qq && apt-get install -y -qq "$tool" || {
-                print_error "无法安装 $tool"
-                exit 1
-            }
+            print_info "正在安装 $tool..."
+            
+            # 尝试使用apt安装
+            if apt-get install -y -qq "$tool" 2>/dev/null; then
+                print_success "$tool 安装成功"
+            else
+                print_warning "apt安装 $tool 失败，尝试其他方法..."
+                
+                # 尝试手动下载安装
+                case "$tool" in
+                    "curl")
+                        apt-get install -y libcurl4-openssl-dev || true
+                        ;;
+                    "wget")
+                        wget_direct_install || true
+                        ;;
+                    "unzip")
+                        unzip_direct_install || true
+                        ;;
+                esac
+                
+                # 再次检查是否安装成功
+                if ! command -v "$tool" &> /dev/null; then
+                    print_error "无法安装 $tool，安装可能不完整"
+                else
+                    print_success "$tool 安装完成"
+                fi
+            fi
+        else
+            print_info "$tool 已安装"
         fi
     done
     
     print_success "系统检查完成"
 }
 
+# 手动安装wget函数
+wget_direct_install() {
+    print_info "手动下载安装 wget..."
+    local arch=$(uname -m)
+    local wget_url=""
+    
+    case "$arch" in
+        x86_64|amd64)
+            wget_url="http://ftp.debian.org/debian/pool/main/w/wget/wget_1.21-1+deb11u1_amd64.deb"
+            ;;
+        aarch64|arm64)
+            wget_url="http://ftp.debian.org/debian/pool/main/w/wget/wget_1.21-1+deb11u1_arm64.deb"
+            ;;
+    esac
+    
+    if [ -n "$wget_url" ]; then
+        curl -L -o /tmp/wget.deb "$wget_url" && dpkg -i /tmp/wget.deb || apt-get install -f -y
+        rm -f /tmp/wget.deb
+    fi
+}
+
+# 手动安装unzip函数
+unzip_direct_install() {
+    print_info "手动下载安装 unzip..."
+    local arch=$(uname -m)
+    local unzip_url=""
+    
+    case "$arch" in
+        x86_64|amd64)
+            unzip_url="http://ftp.debian.org/debian/pool/main/u/unzip/unzip_6.0-26_amd64.deb"
+            ;;
+        aarch64|arm64)
+            unzip_url="http://ftp.debian.org/debian/pool/main/u/unzip/unzip_6.0-26_arm64.deb"
+            ;;
+    esac
+    
+    if [ -n "$unzip_url" ]; then
+        curl -L -o /tmp/unzip.deb "$unzip_url" && dpkg -i /tmp/unzip.deb || apt-get install -f -y
+        rm -f /tmp/unzip.deb
+    fi
+}
+
 # ----------------------------
-# 安装组件
+# 安装组件（改进版）
 # ----------------------------
 install_components() {
     print_info "安装必要组件..."
@@ -126,24 +234,12 @@ install_components() {
     
     case "$arch" in
         x86_64|amd64)
-            local xray_urls=(
-                "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
-                "https://ghproxy.com/https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
-            )
-            local cf_urls=(
-                "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
-                "https://ghproxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
-            )
+            local xray_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+            local cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
             ;;
         aarch64|arm64)
-            local xray_urls=(
-                "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip"
-                "https://ghproxy.com/https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip"
-            )
-            local cf_urls=(
-                "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
-                "https://ghproxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
-            )
+            local xray_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip"
+            local cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
             ;;
         *)
             print_error "不支持的架构: $arch"
@@ -151,48 +247,31 @@ install_components() {
             ;;
     esac
     
-    download_with_retry() {
-        local urls=("$@")
-        local output_file="${urls[-1]}"
-        unset "urls[${#urls[@]}-1]"
-        
-        local max_retries=2
-        
-        for url in "${urls[@]}"; do
-            print_info "下载: $(basename "$output_file")"
-            
-            for ((i=1; i<=max_retries; i++)); do
-                if wget --timeout=30 --tries=1 --quiet -O "$output_file" "$url"; then
-                    if [[ -s "$output_file" ]]; then
-                        print_success "下载成功"
-                        return 0
-                    fi
-                fi
-                
-                if [[ $i -lt $max_retries ]]; then
-                    sleep 1
-                fi
-            done
-        done
-        
-        print_error "下载失败"
-        return 1
-    }
-    
-    if download_with_retry "${xray_urls[@]}" "/tmp/xray.zip"; then
-        unzip -q -o /tmp/xray.zip -d /tmp/
-        local xray_binary=$(find /tmp -name "xray" -type f | head -1)
-        if [[ -n "$xray_binary" ]]; then
-            mv "$xray_binary" "$BIN_DIR/xray"
-            chmod +x "$BIN_DIR/xray"
-            print_success "Xray 安装成功"
+    # 下载安装 Xray
+    print_info "下载 Xray..."
+    if curl -L -o /tmp/xray.zip "$xray_url"; then
+        if unzip -q -o /tmp/xray.zip -d /tmp/; then
+            local xray_binary=$(find /tmp -name "xray" -type f | head -1)
+            if [[ -n "$xray_binary" ]] && [[ -f "$xray_binary" ]]; then
+                mv "$xray_binary" "$BIN_DIR/xray"
+                chmod +x "$BIN_DIR/xray"
+                print_success "Xray 安装成功"
+            else
+                print_error "Xray 解压后未找到二进制文件"
+                exit 1
+            fi
+        else
+            print_error "Xray 解压失败"
+            exit 1
         fi
     else
         print_error "Xray 下载失败"
         exit 1
     fi
     
-    if download_with_retry "${cf_urls[@]}" "/tmp/cloudflared"; then
+    # 下载安装 cloudflared
+    print_info "下载 cloudflared..."
+    if curl -L -o /tmp/cloudflared "$cf_url"; then
         mv /tmp/cloudflared "$BIN_DIR/cloudflared"
         chmod +x "$BIN_DIR/cloudflared"
         print_success "cloudflared 安装成功"
@@ -201,11 +280,14 @@ install_components() {
         exit 1
     fi
     
+    # 清理临时文件
     rm -rf /tmp/xray* /tmp/cloudflare* 2>/dev/null
+    
+    print_success "所有组件安装完成"
 }
 
 # ----------------------------
-# Cloudflare 授权（自动修复凭证问题）
+# Cloudflare 授权
 # ----------------------------
 direct_cloudflare_auth() {
     echo ""
@@ -214,14 +296,16 @@ direct_cloudflare_auth() {
     print_auth "═══════════════════════════════════════════════"
     echo ""
     
+    # 清理旧的授权文件
     rm -rf /root/.cloudflared 2>/dev/null
     mkdir -p /root/.cloudflared
     
     echo "请按以下步骤操作："
-    echo "1. 将运行 cloudflared tunnel login"
-    echo "2. 复制输出的链接到浏览器打开"
-    echo "3. 登录并完成授权"
-    echo "4. 返回终端按回车"
+    echo "1. 脚本将显示一个 Cloudflare 授权链接"
+    echo "2. 复制链接到浏览器打开"
+    echo "3. 登录您的 Cloudflare 账户"
+    echo "4. 选择您要使用的域名并授权"
+    echo "5. 返回终端按回车继续"
     echo ""
     print_input "按回车开始授权..."
     read -r
@@ -230,6 +314,8 @@ direct_cloudflare_auth() {
     echo "=============================================="
     echo "请复制以下链接到浏览器："
     echo ""
+    
+    # 运行授权命令
     "$BIN_DIR/cloudflared" tunnel login
     
     echo ""
@@ -237,18 +323,19 @@ direct_cloudflare_auth() {
     print_input "完成授权后按回车继续..."
     read -r
     
+    # 检查授权结果
     local check_count=0
     while [[ $check_count -lt 10 ]]; do
         if [[ -f "/root/.cloudflared/cert.pem" ]]; then
             print_success "✅ 授权成功！找到证书文件"
             
+            # 检查凭证文件
             if ls /root/.cloudflared/*.json 1> /dev/null 2>&1; then
                 local json_file=$(ls /root/.cloudflared/*.json | head -1)
                 print_success "✅ 找到凭证文件: $(basename "$json_file")"
                 return 0
             else
-                print_warning "⚠️  未找到JSON凭证文件（这是常见问题）"
-                print_info "将自动创建临时隧道来生成凭证..."
+                print_warning "⚠️  未找到JSON凭证文件，将在创建隧道时生成"
                 return 0
             fi
         fi
@@ -257,52 +344,53 @@ direct_cloudflare_auth() {
     done
     
     print_error "❌ 授权失败：未找到证书文件"
-    exit 1
+    return 1
 }
 
 # ----------------------------
-# 创建隧道和配置（自动处理凭证）
+# 创建隧道和配置
 # ----------------------------
 setup_tunnel() {
     print_info "设置 Cloudflare Tunnel..."
     
+    # 检查证书文件
     if [[ ! -f "/root/.cloudflared/cert.pem" ]]; then
-        print_error "❌ 未找到证书文件"
+        print_error "❌ 未找到证书文件，请先完成授权"
         exit 1
     fi
     
     local json_file=""
-    local target_tunnel_name="$TUNNEL_NAME"
-
+    
+    # 检查是否有现有凭证文件
     if ls /root/.cloudflared/*.json 1> /dev/null 2>&1; then
         json_file=$(ls -t /root/.cloudflared/*.json | head -1)
         print_success "✅ 使用现有凭证文件: $(basename "$json_file")"
-        if "$BIN_DIR/cloudflared" tunnel list 2>/dev/null | grep -q "$TUNNEL_NAME"; then
-            print_info "✅ 发现同名隧道，直接使用现有隧道: $TUNNEL_NAME"
-        fi
     else
-        print_warning "⚠️  未找到凭证文件，正在自动创建..."
+        print_warning "⚠️  未找到凭证文件，正在创建隧道..."
         
-        print_info "清理同名旧隧道: $TUNNEL_NAME"
+        # 删除可能存在的同名隧道
         "$BIN_DIR/cloudflared" tunnel delete -f "$TUNNEL_NAME" 2>/dev/null || true
         sleep 2
         
-        print_info "创建隧道: $TUNNEL_NAME (这可能需要几秒钟...)"
-        if timeout 30 "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME"; then
-            sleep 2
-            if ls /root/.cloudflared/*.json 1> /dev/null 2>&1; then
-                json_file=$(ls -t /root/.cloudflared/*.json | head -1)
+        # 创建新隧道
+        print_info "创建隧道: $TUNNEL_NAME"
+        if timeout 60 "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME"; then
+            sleep 3
+            # 查找新生成的凭证文件
+            json_file=$(ls -t /root/.cloudflared/*.json 2>/dev/null | head -1)
+            if [[ -n "$json_file" ]] && [[ -f "$json_file" ]]; then
                 print_success "✅ 隧道创建成功，凭证文件: $(basename "$json_file")"
             else
-                print_error "❌ 创建隧道后仍未生成凭证文件"
+                print_error "❌ 创建隧道后未生成凭证文件"
                 exit 1
             fi
         else
-            print_error "❌ 无法创建隧道 (命令执行失败或超时)"
+            print_error "❌ 无法创建隧道"
             exit 1
         fi
     fi
     
+    # 获取隧道ID
     local tunnel_id
     tunnel_id=$("$BIN_DIR/cloudflared" tunnel list 2>/dev/null | grep "$TUNNEL_NAME" | awk '{print $1}')
     
@@ -313,11 +401,15 @@ setup_tunnel() {
     
     print_success "✅ 隧道就绪 (名称: ${TUNNEL_NAME}, ID: ${tunnel_id})"
     
+    # 绑定域名
     print_info "绑定域名: $USER_DOMAIN"
     "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN" > /dev/null 2>&1
     print_success "✅ 域名绑定成功"
     
+    # 创建配置目录
     mkdir -p "$CONFIG_DIR"
+    
+    # 保存隧道配置
     cat > "$CONFIG_DIR/tunnel.conf" << EOF
 TUNNEL_ID=$tunnel_id
 TUNNEL_NAME=$TUNNEL_NAME
@@ -339,11 +431,14 @@ configure_xray() {
     local uuid=$(cat /proc/sys/kernel/random/uuid)
     local port=10000
     
+    # 保存UUID和端口到配置文件
     echo "UUID=$uuid" >> "$CONFIG_DIR/tunnel.conf"
     echo "PORT=$port" >> "$CONFIG_DIR/tunnel.conf"
     
+    # 创建必要的目录
     mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     
+    # 创建Xray配置文件
     cat > "$CONFIG_DIR/xray.json" << EOF
 {
     "log": {"loglevel": "warning"},
@@ -374,12 +469,39 @@ EOF
 configure_services() {
     print_info "配置系统服务..."
     
+    # 创建服务用户
     if ! id -u "$SERVICE_USER" &> /dev/null; then
         useradd -r -s /usr/sbin/nologin "$SERVICE_USER"
     fi
     
+    # 设置目录权限
     chown -R "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     
+    # 从配置文件读取信息
+    local tunnel_id=$(grep "^TUNNEL_ID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local json_file=$(grep "^CREDENTIALS_FILE=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local port=$(grep "^PORT=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    
+    # 创建 cloudflared 配置文件
+    cat > "$CONFIG_DIR/config.yaml" << EOF
+tunnel: $tunnel_id
+credentials-file: $json_file
+logfile: $LOG_DIR/argo.log
+loglevel: info
+ingress:
+  - hostname: $domain
+    service: http://localhost:$port
+    originRequest:
+      noTLSVerify: true
+      httpHostHeader: $domain
+      connectTimeout: 30s
+      tcpKeepAlive: 30s
+      noHappyEyeballs: true
+  - service: http_status:404
+EOF
+    
+    # 创建 Xray 服务文件
     cat > /etc/systemd/system/secure-tunnel-xray.service << EOF
 [Unit]
 Description=Secure Tunnel Xray Service
@@ -399,28 +521,7 @@ StandardError=append:$LOG_DIR/xray-error.log
 WantedBy=multi-user.target
 EOF
     
-    local tunnel_id=$(grep "^TUNNEL_ID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local json_file=$(grep "^CREDENTIALS_FILE=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local port=$(grep "^PORT=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    
-    cat > "$CONFIG_DIR/config.yaml" << EOF
-tunnel: $tunnel_id
-credentials-file: $json_file
-logfile: $LOG_DIR/argo.log
-loglevel: info
-ingress:
-  - hostname: $domain
-    service: http://localhost:$port
-    originRequest:
-      noTLSVerify: true
-      httpHostHeader: $domain
-      connectTimeout: 30s
-      tcpKeepAlive: 30s
-      noHappyEyeballs: true
-  - service: http_status:404
-EOF
-    
+    # 创建 Argo Tunnel 服务文件
     cat > /etc/systemd/system/secure-tunnel-argo.service << EOF
 [Unit]
 Description=Secure Tunnel Argo Service
@@ -443,6 +544,7 @@ StandardError=append:$LOG_DIR/argo-error.log
 WantedBy=multi-user.target
 EOF
     
+    # 重载systemd
     systemctl daemon-reload
     print_success "系统服务配置完成"
 }
@@ -453,10 +555,12 @@ EOF
 start_services() {
     print_info "启动服务..."
     
+    # 停止可能存在的旧服务
     systemctl stop secure-tunnel-argo.service 2>/dev/null || true
     systemctl stop secure-tunnel-xray.service 2>/dev/null || true
     sleep 2
     
+    # 启动Xray服务
     systemctl enable secure-tunnel-xray.service > /dev/null 2>&1
     systemctl start secure-tunnel-xray.service
     sleep 3
@@ -469,10 +573,12 @@ start_services() {
         return 1
     fi
     
+    # 启动Argo Tunnel服务
     print_info "启动 Argo Tunnel..."
     systemctl enable secure-tunnel-argo.service > /dev/null 2>&1
     systemctl start secure-tunnel-argo.service
     
+    # 等待隧道连接
     local wait_time=0
     local max_wait=60
     
@@ -517,7 +623,6 @@ show_connection_info() {
     
     local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local port=$(grep "^PORT=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     
     if [[ -z "$domain" ]] || [[ -z "$uuid" ]]; then
         print_error "无法读取配置"
@@ -526,14 +631,13 @@ show_connection_info() {
     
     print_success "🔗 域名: $domain"
     print_success "🔑 UUID: $uuid"
-    print_success "🚪 端口: 443 (TLS) / 80 (非TLS)"
+    print_success "🚪 端口: 443 (TLS)"
     print_success "🛣️  路径: /$uuid"
-    print_success "🔧 本地端口: $port"
     echo ""
     
-    local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道"
+    local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#Cloudflare-Tunnel"
     
-    echo "VLESS 链接:"
+    echo "📋 VLESS 链接:"
     echo "$vless_tls"
     echo ""
     
@@ -576,8 +680,9 @@ main_install() {
     install_components
     collect_user_info
     
+    # Cloudflare 授权
     if ! direct_cloudflare_auth; then
-        print_warning "授权可能有问題，继续安装可能失败"
+        print_warning "授权可能有问题"
         print_input "是否继续安装？(y/N): "
         read -r continue_install
         if [[ "$continue_install" != "y" && "$continue_install" != "Y" ]]; then
@@ -586,6 +691,7 @@ main_install() {
         fi
     fi
     
+    # 设置隧道
     if ! setup_tunnel; then
         print_error "隧道设置失败"
         return 1
@@ -633,15 +739,12 @@ uninstall_all() {
     rm -f /etc/systemd/system/secure-tunnel-argo.service
     rm -f /etc/systemd/system/secure-tunnel-xray.service
     
-    rm -rf "$CONFIG_DIR"
-    rm -rf "$DATA_DIR"
-    rm -rf "$LOG_DIR"
+    rm -rf "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     
     print_input "是否删除 Xray 和 cloudflared 二进制文件？(y/N): "
     read -r delete_bin
     if [[ "$delete_bin" == "y" || "$delete_bin" == "Y" ]]; then
-        rm -f "$BIN_DIR/xray"
-        rm -f "$BIN_DIR/cloudflared"
+        rm -f "$BIN_DIR/xray" "$BIN_DIR/cloudflared"
     fi
     
     userdel "$SERVICE_USER" 2>/dev/null || true
@@ -682,7 +785,7 @@ show_config() {
     echo "  UUID: $uuid"
     echo ""
     
-    local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#安全隧道"
+    local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#Cloudflare-Tunnel"
     
     print_info "📡 VLESS链接:"
     echo "$vless_tls"
@@ -698,9 +801,6 @@ show_status() {
     
     if systemctl is-active --quiet secure-tunnel-xray.service; then
         print_success "Xray 服务: 运行中"
-        echo ""
-        print_info "Xray 服务状态:"
-        systemctl status secure-tunnel-xray.service --no-pager -l | head -10
     else
         print_error "Xray 服务: 未运行"
     fi
@@ -709,129 +809,13 @@ show_status() {
     
     if systemctl is-active --quiet secure-tunnel-argo.service; then
         print_success "Argo Tunnel 服务: 运行中"
+        
         echo ""
-        print_info "Argo 服务状态:"
-        systemctl status secure-tunnel-argo.service --no-pager -l | head -10
-        echo ""
-        print_info "隧道列表:"
+        print_info "隧道信息:"
         "$BIN_DIR/cloudflared" tunnel list 2>/dev/null || true
     else
         print_error "Argo Tunnel 服务: 未运行"
     fi
-}
-
-# ----------------------------
-# 手动修复授权
-# ----------------------------
-manual_auth_fix() {
-    echo ""
-    print_auth "═══════════════════════════════════════════════"
-    print_auth "        手动修复授权问题"
-    print_auth "═══════════════════════════════════════════════"
-    echo ""
-    
-    print_info "当前问题：cloudflared tunnel login 不生成凭证文件"
-    echo ""
-    print_info "解决方案："
-    print_info "1. 手动运行授权命令"
-    print_info "2. 使用替代方法获取凭证"
-    echo ""
-    
-    echo "请选择修复方法："
-    echo ""
-    echo "  1) 重新运行 cloudflared tunnel login"
-    echo "  2) 使用 tunnel create 生成凭证"
-    echo "  3) 检查当前授权状态"
-    echo "  4) 返回主菜单"
-    echo ""
-    
-    print_input "请输入选项 (1-4): "
-    read -r fix_choice
-    
-    case "$fix_choice" in
-        1)
-            echo ""
-            print_info "方法1：重新授权"
-            echo "=============================================="
-            rm -rf /root/.cloudflared 2>/dev/null
-            mkdir -p /root/.cloudflared
-            
-            echo "请复制以下链接到浏览器："
-            /usr/local/bin/cloudflared tunnel login 2>&1 | grep -o "https://[^ ]*" | head -1 || echo "https://dash.cloudflare.com/argotunnel"
-            
-            echo ""
-            echo "=============================================="
-            echo ""
-            print_info "完成后检查文件："
-            echo "  ls -la /root/.cloudflared/"
-            echo "  应该看到 cert.pem 和 *.json 文件"
-            echo ""
-            print_input "按回车键继续..."
-            read -r
-            ;;
-        2)
-            echo ""
-            print_info "方法2：创建隧道生成凭证"
-            echo "=============================================="
-            
-            if [[ ! -f "/root/.cloudflared/cert.pem" ]]; then
-                print_error "未找到证书文件，请先运行方法1"
-                return
-            fi
-            
-            print_info "创建测试隧道来生成凭证..."
-            local test_name="fix-tunnel-$(date +%s)"
-            /usr/local/bin/cloudflared tunnel create "$test_name"
-            
-            echo ""
-            print_info "检查生成的文件："
-            ls -la /root/.cloudflared/
-            
-            echo ""
-            print_info "删除测试隧道："
-            /usr/local/bin/cloudflared tunnel delete -f "$test_name"
-            ;;
-        3)
-            echo ""
-            print_info "当前授权状态："
-            echo "=============================================="
-            echo "1. /root/.cloudflared/ 目录内容："
-            ls -la /root/.cloudflared/ 2>/dev/null || echo "目录不存在"
-            
-            echo ""
-            echo "2. 证书文件检查："
-            if [[ -f "/root/.cloudflared/cert.pem" ]]; then
-                echo "  ✅ cert.pem 存在"
-                echo "  大小: $(stat -c%s /root/.cloudflared/cert.pem) 字节"
-            else
-                echo "  ❌ cert.pem 不存在"
-            fi
-            
-            echo ""
-            echo "3. 凭证文件检查："
-            local json_count=$(find /root/.cloudflared -name "*.json" -type f 2>/dev/null | wc -l)
-            if [[ $json_count -gt 0 ]]; then
-                echo "  ✅ 找到 $json_count 个JSON文件"
-                find /root/.cloudflared -name "*.json" -type f | while read file; do
-                    echo "  - $(basename "$file")"
-                done
-            else
-                echo "  ❌ 未找到JSON文件"
-            fi
-            echo "=============================================="
-            ;;
-        4)
-            return
-            ;;
-        *)
-            print_error "无效选项"
-            ;;
-    esac
-    
-    echo ""
-    print_input "按回车键返回修复菜单..."
-    read -r
-    manual_auth_fix
 }
 
 # ----------------------------
@@ -846,12 +830,10 @@ show_menu() {
     echo "  2) 卸载 Secure Tunnel"
     echo "  3) 查看服务状态"
     echo "  4) 查看配置信息"
-    echo "  5) 手动修复授权问题"
-    echo "  6) 静默安装 (使用默认值)"
-    echo "  7) 退出"
+    echo "  5) 退出"
     echo ""
     
-    print_input "请输入选项 (1-7): "
+    print_input "请输入选项 (1-5): "
     read -r choice
     
     case "$choice" in
@@ -887,22 +869,6 @@ show_menu() {
             read -r
             ;;
         5)
-            manual_auth_fix
-            ;;
-        6)
-            SILENT_MODE=true
-            if main_install; then
-                echo ""
-                print_input "按回车键返回菜单..."
-                read -r
-            else
-                echo ""
-                print_error "安装失败"
-                print_input "按回车键返回菜单..."
-                read -r
-            fi
-            ;;
-        7)
             print_info "再见！"
             exit 0
             ;;
@@ -929,17 +895,13 @@ main() {
             show_title
             uninstall_all
             ;;
-        "config"|"subscription")
+        "config")
             show_title
             show_config
             ;;
         "status")
             show_title
             show_status
-            ;;
-        "fix-auth")
-            show_title
-            manual_auth_fix
             ;;
         "-y"|"--silent")
             SILENT_MODE=true
@@ -957,13 +919,13 @@ main() {
             echo "  sudo ./secure_tunnel.sh uninstall     # 卸载"
             echo "  sudo ./secure_tunnel.sh status        # 查看状态"
             echo "  sudo ./secure_tunnel.sh config        # 查看配置"
-            echo "  sudo ./secure_tunnel.sh fix-auth      # 修复授权"
             echo "  sudo ./secure_tunnel.sh -y            # 静默安装"
             exit 1
             ;;
     esac
 }
 
+# 检查是否以root运行
 if [[ $EUID -ne 0 ]] && [[ "${1:-}" != "" ]]; then
     print_error "请使用root权限运行此脚本"
     exit 1
