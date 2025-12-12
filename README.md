@@ -40,7 +40,7 @@ Cloudflare 账户
 快速开始
 1. 下载脚本
 ```
-curl -sSL -o secure_tunnel.sh https://github.com/wei-zZZ/Cloudflare-Tunnel-Xray/blob/main/argox.sh
+curl -sSL -o secure_tunnel.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/argox.sh
 ```
 ```
 chmod +x secure_tunnel.sh
