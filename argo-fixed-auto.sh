@@ -55,7 +55,6 @@ get_cloudflare_config() {
         echo -e "${green}已加载现有配置${plain}"
         echo -e "邮箱: ${CF_EMAIL}"
         echo -e "域名: ${CF_DOMAIN}"
-        echo -e "Zone ID: ${CF_ZONE_ID}"
         echo ""
         read -p "是否使用现有配置？(Y/n): " use_existing
         if [[ "$use_existing" =~ ^[Nn]$ ]]; then
@@ -90,8 +89,8 @@ get_cloudflare_config() {
         return 1
     fi
     
-    # 使用API获取Zone ID
-    echo -e "${green}正在验证API Key并获取Zone ID...${plain}"
+    # 验证域名是否在Cloudflare
+    echo -e "${green}正在验证域名...${plain}"
     
     response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=${cf_domain}" \
         -H "X-Auth-Email: ${cf_email}" \
@@ -122,122 +121,6 @@ EOF
         return 0
     else
         echo -e "${red}API验证失败，请检查邮箱和API Key${plain}"
-        echo "响应信息: $response"
-        return 1
-    fi
-}
-
-# 使用API创建隧道
-create_tunnel_with_api() {
-    local tunnel_name="$1"
-    local port="$2"
-    
-    echo -e "${green}正在创建Cloudflare Zero Trust隧道...${plain}"
-    
-    # 第一步：获取Zero Trust账户ID
-    echo -e "${yellow}获取Zero Trust账户ID...${plain}"
-    
-    account_response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts" \
-        -H "X-Auth-Email: ${CF_EMAIL}" \
-        -H "X-Auth-Key: ${CF_API_KEY}" \
-        -H "Content-Type: application/json")
-    
-    if echo "$account_response" | grep -q '"success":true'; then
-        account_id=$(echo "$account_response" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-        echo -e "${green}账户ID获取成功: ${account_id}${plain}"
-    else
-        echo -e "${red}获取账户ID失败${plain}"
-        echo "可能需要开通Zero Trust服务"
-        return 1
-    fi
-    
-    # 第二步：创建隧道
-    echo -e "${yellow}创建隧道: ${tunnel_name}...${plain}"
-    
-    tunnel_response=$(curl -s -X POST "https://api.cloudflare.com/client/v4/accounts/${account_id}/cfd_tunnel" \
-        -H "X-Auth-Email: ${CF_EMAIL}" \
-        -H "X-Auth-Key: ${CF_API_KEY}" \
-        -H "Content-Type: application/json" \
-        --data "{\"name\":\"${tunnel_name}\",\"tunnel_secret\":\"$(openssl rand -hex 32)\"}")
-    
-    if echo "$tunnel_response" | grep -q '"success":true'; then
-        tunnel_id=$(echo "$tunnel_response" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-        tunnel_token=$(echo "$tunnel_response" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
-        
-        echo -e "${green}隧道创建成功！${plain}"
-        echo -e "隧道ID: ${tunnel_id}"
-        
-        # 保存token
-        echo "$tunnel_token" > /usr/local/x-ui/xuiargotoken.log
-        echo "$port" > /usr/local/x-ui/xuiargoymport.log
-        
-        # 生成配置文件
-        cat > /usr/local/x-ui/cloudflared_config.yml << EOF
-tunnel: ${tunnel_id}
-credentials-file: /usr/local/x-ui/credentials.json
-ingress:
-  - hostname: \${TUNNEL_HOSTNAME}
-    service: http://localhost:${port}
-  - service: http_status:404
-EOF
-        
-        # 创建credentials文件
-        cat > /usr/local/x-ui/credentials.json << EOF
-{
-  "AccountTag": "${account_id}",
-  "TunnelSecret": "$(echo "$tunnel_response" | grep -o '"secret":"[^"]*"' | cut -d'"' -f4)",
-  "TunnelID": "${tunnel_id}",
-  "TunnelName": "${tunnel_name}"
-}
-EOF
-        
-        return 0
-    else
-        echo -e "${red}隧道创建失败${plain}"
-        echo "响应: $tunnel_response"
-        return 1
-    fi
-}
-
-# 使用API配置DNS记录
-configure_dns_with_api() {
-    local subdomain="$1"
-    local tunnel_id="$2"
-    
-    echo -e "${yellow}配置DNS记录: ${subdomain}.${CF_DOMAIN}...${plain}"
-    
-    # 首先检查记录是否已存在
-    dns_response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?type=CNAME&name=${subdomain}.${CF_DOMAIN}" \
-        -H "X-Auth-Email: ${CF_EMAIL}" \
-        -H "X-Auth-Key: ${CF_API_KEY}" \
-        -H "Content-Type: application/json")
-    
-    # 删除已存在的记录
-    if echo "$dns_response" | grep -q '"id"'; then
-        record_id=$(echo "$dns_response" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-        echo -e "${yellow}删除已存在的DNS记录...${plain}"
-        
-        delete_response=$(curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records/${record_id}" \
-            -H "X-Auth-Email: ${CF_EMAIL}" \
-            -H "X-Auth-Key: ${CF_API_KEY}" \
-            -H "Content-Type: application/json")
-    fi
-    
-    # 创建新的CNAME记录
-    create_response=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records" \
-        -H "X-Auth-Email: ${CF_EMAIL}" \
-        -H "X-Auth-Key: ${CF_API_KEY}" \
-        -H "Content-Type: application/json" \
-        --data "{\"type\":\"CNAME\",\"name\":\"${subdomain}\",\"content\":\"${tunnel_id}.cfargotunnel.com\",\"ttl\":120,\"proxied\":true}")
-    
-    if echo "$create_response" | grep -q '"success":true'; then
-        echo -e "${green}DNS记录配置成功！${plain}"
-        echo -e "访问地址: https://${subdomain}.${CF_DOMAIN}"
-        echo "${subdomain}.${CF_DOMAIN}" > /usr/local/x-ui/xuiargoym.log
-        return 0
-    else
-        echo -e "${red}DNS记录配置失败${plain}"
-        echo "响应: $create_response"
         return 1
     fi
 }
@@ -261,11 +144,60 @@ show_ws_nodes() {
     return 0
 }
 
-# 启动Argo固定隧道（自动化版本）
-start_argo_fixed_tunnel_auto() {
+# 使用API创建隧道
+create_tunnel_with_api() {
+    echo -e "${green}正在创建Cloudflare隧道...${plain}"
+    
+    # 获取账户ID
+    echo -e "${yellow}获取账户信息...${plain}"
+    
+    account_response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts" \
+        -H "X-Auth-Email: ${CF_EMAIL}" \
+        -H "X-Auth-Key: ${CF_API_KEY}" \
+        -H "Content-Type: application/json")
+    
+    if echo "$account_response" | grep -q '"success":true'; then
+        account_id=$(echo "$account_response" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+        echo -e "${green}账户ID获取成功: ${account_id}${plain}"
+    else
+        echo -e "${red}获取账户ID失败${plain}"
+        return 1
+    fi
+    
+    # 创建隧道
+    echo -e "${yellow}创建隧道...${plain}"
+    
+    tunnel_name="xui-tunnel-$(date +%s)"
+    
+    tunnel_response=$(curl -s -X POST "https://api.cloudflare.com/client/v4/accounts/${account_id}/cfd_tunnel" \
+        -H "X-Auth-Email: ${CF_EMAIL}" \
+        -H "X-Auth-Key: ${CF_API_KEY}" \
+        -H "Content-Type: application/json" \
+        --data "{\"name\":\"${tunnel_name}\",\"tunnel_secret\":\"$(openssl rand -hex 32)\"}")
+    
+    if echo "$tunnel_response" | grep -q '"success":true'; then
+        tunnel_id=$(echo "$tunnel_response" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+        tunnel_token=$(echo "$tunnel_response" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+        
+        echo -e "${green}隧道创建成功！${plain}"
+        echo -e "隧道ID: ${tunnel_id}"
+        
+        # 保存token
+        echo "$tunnel_token" > /usr/local/x-ui/xuiargotoken.log
+        
+        return 0
+    else
+        echo -e "${red}隧道创建失败${plain}"
+        return 1
+    fi
+}
+
+# 手动配置模式（兼容模式）
+manual_tunnel_setup() {
     local port=$1
     
-    echo -e "${green}正在启动自动化Argo固定隧道安装...${plain}"
+    echo -e "${blue}=== 手动配置Argo固定隧道 ===${plain}"
+    echo ""
     
     # 停止已有的cloudflared进程
     if [[ -n $(ps -e | grep cloudflared) ]]; then
@@ -273,67 +205,67 @@ start_argo_fixed_tunnel_auto() {
         sleep 2
     fi
     
-    # 获取隧道名称
-    echo ""
-    read -p "请输入隧道名称（建议使用英文，如: xui-tunnel）: " tunnel_name
-    if [ -z "$tunnel_name" ]; then
-        tunnel_name="xui-tunnel-$(date +%s)"
-    fi
+    download_cloudflared
     
-    # 获取子域名
+    echo -e "${yellow}请按照以下步骤操作：${plain}"
     echo ""
-    read -p "请输入子域名（例如输入 'xui' 将创建 xui.yourdomain.com）: " subdomain
-    if [ -z "$subdomain" ]; then
-        subdomain="xui$(date +%m%d)"
-    fi
+    echo "1. 访问 https://dash.cloudflare.com/"
+    echo "2. 进入 Zero Trust → Networks → Tunnels"
+    echo "3. 点击 'Create a tunnel'"
+    echo "4. 输入隧道名称（例如: my-xui-tunnel）"
+    echo "5. 选择 'cloudflared' 连接器"
+    echo "6. 复制显示的Token"
+    echo ""
     
-    # 第一步：创建隧道
-    echo ""
-    if create_tunnel_with_api "$tunnel_name" "$port"; then
-        # 第二步：配置DNS
-        echo ""
-        if configure_dns_with_api "$subdomain" "$tunnel_id"; then
-            # 第三步：启动隧道
-            echo ""
-            echo -e "${yellow}启动隧道服务...${plain}"
-            
-            # 设置环境变量
-            export TUNNEL_HOSTNAME="${subdomain}.${CF_DOMAIN}"
-            
-            nohup setsid /usr/local/x-ui/cloudflared tunnel --config /usr/local/x-ui/cloudflared_config.yml run >/dev/null 2>&1 &
-            echo "$!" > /usr/local/x-ui/xuiargoympid.log
-            
-            echo -e "${yellow}等待隧道连接...${plain}"
-            sleep 15
-            
-            # 检查进程是否运行
-            pid=$(cat /usr/local/x-ui/xuiargoympid.log 2>/dev/null)
-            if ! ps -p $pid > /dev/null 2>&1; then
-                echo -e "${red}隧道启动失败${plain}"
-                exit 1
-            fi
-            
-            echo -e "${green}✅ Argo固定隧道安装完成！${plain}"
-            echo ""
-            echo -e "${blue}隧道信息:${plain}"
-            echo -e "隧道名称: ${tunnel_name}"
-            echo -e "访问地址: https://${subdomain}.${CF_DOMAIN}"
-            echo -e "本地端口: ${port}"
-            
-            # 生成订阅链接
-            generate_subscription_links "$port" "${subdomain}.${CF_DOMAIN}"
-            
-            # 添加开机自启
-            add_auto_start "$port" "${subdomain}.${CF_DOMAIN}"
-            
-        else
-            echo -e "${red}DNS配置失败${plain}"
-            return 1
-        fi
-    else
-        echo -e "${red}隧道创建失败${plain}"
+    read -p "请输入复制的Token: " token
+    if [ -z "$token" ]; then
+        echo -e "${red}Token不能为空${plain}"
         return 1
     fi
+    
+    read -p "请输入固定域名（例如: xui.yourdomain.com）: " domain
+    if [ -z "$domain" ]; then
+        echo -e "${red}域名不能为空${plain}"
+        return 1
+    fi
+    
+    # 保存配置
+    echo "$token" > /usr/local/x-ui/xuiargotoken.log
+    echo "$port" > /usr/local/x-ui/xuiargoymport.log
+    echo "$domain" > /usr/local/x-ui/xuiargoym.log
+    
+    # 启动隧道
+    echo -e "${green}正在启动隧道...${plain}"
+    
+    nohup setsid /usr/local/x-ui/cloudflared tunnel \
+        --no-autoupdate \
+        --edge-ip-version auto \
+        --protocol http2 \
+        run --token "$token" >/dev/null 2>&1 &
+    
+    echo "$!" > /usr/local/x-ui/xuiargoympid.log
+    
+    echo -e "${yellow}等待隧道连接...${plain}"
+    sleep 15
+    
+    # 检查进程
+    pid=$(cat /usr/local/x-ui/xuiargoympid.log 2>/dev/null)
+    if ! ps -p $pid > /dev/null 2>&1; then
+        echo -e "${red}隧道启动失败${plain}"
+        return 1
+    fi
+    
+    echo -e "${green}✅ 隧道启动成功！${plain}"
+    echo -e "域名: ${domain}"
+    echo -e "端口: ${port}"
+    
+    # 生成订阅链接
+    generate_subscription_links "$port" "$domain"
+    
+    # 添加开机自启
+    add_auto_start "$domain"
+    
+    return 0
 }
 
 # 生成订阅链接
@@ -348,7 +280,7 @@ generate_subscription_links() {
         ws_path=$(echo "$node_info" | jq -r '.streamSettings.wsSettings.path')
         
         echo ""
-        echo -e "${green}📋 订阅链接已生成:${plain}"
+        echo -e "${green}📋 订阅链接:${plain}"
         
         case $protocol in
             "vless")
@@ -359,7 +291,7 @@ generate_subscription_links() {
                 ;;
             "vmess")
                 uuid=$(echo "$node_info" | jq -r '.settings.clients[0].id')
-                echo -e "${blue}VMESS-WS (Base64):${plain}"
+                echo -e "${blue}VMESS-WS:${plain}"
                 echo -n '{"add":"'${domain}'","aid":"0","host":"'${domain}'","id":"'${uuid}'","net":"ws","path":"'${ws_path}'","port":"8880","ps":"Argo固定隧道","v":"2"}' | base64 -w 0
                 echo ""
                 echo -n '{"add":"'${domain}'","aid":"0","host":"'${domain}'","id":"'${uuid}'","net":"ws","path":"'${ws_path}'","port":"8443","ps":"Argo固定隧道(TLS)","tls":"tls","sni":"'${domain}'","type":"none","v":"2"}' | base64 -w 0
@@ -376,42 +308,45 @@ generate_subscription_links() {
 
 # 添加开机自启
 add_auto_start() {
-    local port=$1
-    local domain=$2
+    local domain=$1
     
-    cat > /root/argo_fixed_tunnel_auto.sh << EOF
+    cat > /root/argo_fixed_tunnel.sh << EOF
 #!/bin/bash
 export TUNNEL_HOSTNAME="${domain}"
-/usr/local/x-ui/cloudflared tunnel --config /usr/local/x-ui/cloudflared_config.yml run >/dev/null 2>&1 &
+nohup setsid /usr/local/x-ui/cloudflared tunnel \\
+    --no-autoupdate \\
+    --edge-ip-version auto \\
+    --protocol http2 \\
+    run --token \$(cat /usr/local/x-ui/xuiargotoken.log 2>/dev/null) >/dev/null 2>&1 &
 echo \$! > /usr/local/x-ui/xuiargoympid.log
 EOF
     
-    chmod +x /root/argo_fixed_tunnel_auto.sh
+    chmod +x /root/argo_fixed_tunnel.sh
     
-    if ! grep -q "@reboot root bash /root/argo_fixed_tunnel_auto.sh" /etc/crontab 2>/dev/null; then
-        echo "@reboot root bash /root/argo_fixed_tunnel_auto.sh >/dev/null 2>&1" >> /etc/crontab
+    if ! grep -q "@reboot root bash /root/argo_fixed_tunnel.sh" /etc/crontab 2>/dev/null; then
+        echo "@reboot root bash /root/argo_fixed_tunnel.sh >/dev/null 2>&1" >> /etc/crontab
         echo -e "${green}✅ 已添加到开机自启${plain}"
     fi
 }
 
-# 停止Argo固定隧道
-stop_argo_fixed_tunnel() {
-    echo -e "${yellow}正在停止Argo固定隧道...${plain}"
+# 停止隧道
+stop_argo_tunnel() {
+    echo -e "${yellow}正在停止Argo隧道...${plain}"
     
     if [ -f /usr/local/x-ui/xuiargoympid.log ]; then
         pid=$(cat /usr/local/x-ui/xuiargoympid.log)
         kill -15 $pid >/dev/null 2>&1
         sleep 2
         
-        echo -e "${green}✅ Argo固定隧道已停止${plain}"
+        echo -e "${green}✅ 隧道已停止${plain}"
     else
-        echo -e "${yellow}没有运行中的Argo固定隧道${plain}"
+        echo -e "${yellow}没有运行中的隧道${plain}"
     fi
 }
 
-# 查看Argo固定隧道状态
-check_argo_fixed_status() {
-    echo -e "${blue}=== Argo固定隧道状态 ===${plain}"
+# 查看隧道状态
+check_argo_status() {
+    echo -e "${blue}=== Argo隧道状态 ===${plain}"
     echo ""
     
     if [ -f /usr/local/x-ui/xuiargoympid.log ]; then
@@ -427,41 +362,18 @@ check_argo_fixed_status() {
             
             if [ -f /usr/local/x-ui/xuiargoym.log ]; then
                 domain=$(cat /usr/local/x-ui/xuiargoym.log)
-                echo -e "${blue}固定域名: ${plain}${domain}"
-                
-                # 测试域名连通性
-                echo -e "${yellow}测试域名连通性...${plain}"
-                if timeout 5 curl -s "https://${domain}" > /dev/null 2>&1; then
-                    echo -e "${green}✅ 域名可以访问${plain}"
-                elif timeout 5 curl -s "http://${domain}" > /dev/null 2>&1; then
-                    echo -e "${green}✅ 域名可以访问（HTTP）${plain}"
-                else
-                    echo -e "${yellow}⚠️  域名无法访问${plain}"
-                fi
+                echo -e "${blue}域名: ${plain}${domain}"
             fi
         else
             echo -e "${red}❌ 隧道进程已停止${plain}"
         fi
     else
-        echo -e "${yellow}⚠️  Argo固定隧道未运行${plain}"
-    fi
-    
-    # 显示Cloudflare配置状态
-    echo ""
-    echo -e "${blue}=== Cloudflare配置状态 ===${plain}"
-    if [ -f /usr/local/x-ui/cf_config.sh ]; then
-        source /usr/local/x-ui/cf_config.sh
-        echo -e "${green}✅ Cloudflare配置已加载${plain}"
-        echo -e "邮箱: ${CF_EMAIL}"
-        echo -e "域名: ${CF_DOMAIN}"
-        echo -e "Zone ID: ${CF_ZONE_ID}"
-    else
-        echo -e "${yellow}⚠️  Cloudflare配置未设置${plain}"
+        echo -e "${yellow}⚠️  隧道未运行${plain}"
     fi
 }
 
-# 手动模式安装
-manual_installation() {
+# 安装隧道
+install_argo_tunnel() {
     if ! show_ws_nodes; then
         return 1
     fi
@@ -487,34 +399,90 @@ manual_installation() {
         return 1
     fi
     
-    # 验证TLS
-    tls_enabled=$(echo "$node_exists" | jq -r '.streamSettings.security')
-    if [ "$tls_enabled" = "tls" ]; then
-        echo -e "${yellow}警告：该节点开启了TLS，Argo隧道不支持TLS节点${plain}"
-        read -p "是否继续？(y/N): " confirm
-        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-            return 1
-        fi
-    fi
+    echo ""
+    echo -e "${blue}请选择安装方式:${plain}"
+    echo "1. 自动化安装（需要Cloudflare API）"
+    echo "2. 手动安装（需要手动复制Token）"
+    read -p "请选择 [1-2]: " install_type
     
-    download_cloudflared
-    start_argo_fixed_tunnel_auto "$port"
+    case $install_type in
+        1)
+            if [ ! -f /usr/local/x-ui/cf_config.sh ]; then
+                echo -e "${red}请先配置Cloudflare API信息${plain}"
+                return 1
+            fi
+            source /usr/local/x-ui/cf_config.sh
+            
+            if create_tunnel_with_api; then
+                # 配置DNS
+                echo ""
+                read -p "请输入子域名（例如输入 'xui' 将创建 xui.${CF_DOMAIN}）: " subdomain
+                if [ -z "$subdomain" ]; then
+                    subdomain="xui$(date +%m%d)"
+                fi
+                
+                domain="${subdomain}.${CF_DOMAIN}"
+                echo "$port" > /usr/local/x-ui/xuiargoymport.log
+                echo "$domain" > /usr/local/x-ui/xuiargoym.log
+                
+                # 启动隧道
+                echo -e "${green}启动隧道...${plain}"
+                nohup setsid /usr/local/x-ui/cloudflared tunnel \
+                    --no-autoupdate \
+                    --edge-ip-version auto \
+                    --protocol http2 \
+                    run --token "$(cat /usr/local/x-ui/xuiargotoken.log)" >/dev/null 2>&1 &
+                echo "$!" > /usr/local/x-ui/xuiargoympid.log
+                
+                sleep 15
+                echo -e "${green}✅ 安装完成！${plain}"
+                generate_subscription_links "$port" "$domain"
+                add_auto_start "$domain"
+            fi
+            ;;
+        2)
+            manual_tunnel_setup "$port"
+            ;;
+        *)
+            echo -e "${red}无效选择${plain}"
+            return 1
+            ;;
+    esac
+}
+
+# 清理配置
+cleanup_config() {
+    echo -e "${yellow}正在清理所有配置...${plain}"
+    
+    stop_argo_tunnel
+    sleep 2
+    
+    rm -f /usr/local/x-ui/cf_config.sh 2>/dev/null
+    rm -f /usr/local/x-ui/xuiargoympid.log 2>/dev/null
+    rm -f /usr/local/x-ui/xuiargoymport.log 2>/dev/null
+    rm -f /usr/local/x-ui/xuiargoym.log 2>/dev/null
+    rm -f /usr/local/x-ui/xuiargotoken.log 2>/dev/null
+    rm -f /root/argo_fixed_tunnel.sh 2>/dev/null
+    
+    sed -i '/argo_fixed_tunnel.sh/d' /etc/crontab 2>/dev/null
+    
+    echo -e "${green}✅ 所有配置已清理${plain}"
 }
 
 # 主菜单
 show_menu() {
     echo ""
-    echo -e "${blue}========== Argo固定隧道自动化安装器 ==========${plain}"
-    echo -e "${green}使用Cloudflare API自动创建和管理隧道${plain}"
+    echo -e "${blue}========== Argo固定隧道安装器 ==========${plain}"
+    echo -e "${green}为x-ui节点创建Cloudflare固定隧道${plain}"
     echo ""
     
     check_xui_installed
     
     echo -e "${green}1. 查看x-ui中的WS节点${plain}"
     echo -e "${green}2. 配置Cloudflare API信息${plain}"
-    echo -e "${green}3. 自动化安装Argo固定隧道${plain}"
-    echo -e "${green}4. 停止Argo固定隧道${plain}"
-    echo -e "${green}5. 查看Argo固定隧道状态${plain}"
+    echo -e "${green}3. 安装Argo固定隧道${plain}"
+    echo -e "${green}4. 停止隧道${plain}"
+    echo -e "${green}5. 查看隧道状态${plain}"
     echo -e "${green}6. 生成订阅链接${plain}"
     echo -e "${green}7. 清理所有配置${plain}"
     echo -e "${green}0. 退出${plain}"
@@ -534,23 +502,17 @@ show_menu() {
             show_menu
             ;;
         3)
-            if [ ! -f /usr/local/x-ui/cf_config.sh ]; then
-                echo -e "${red}请先配置Cloudflare API信息${plain}"
-                read -p "按回车键返回主菜单..." key
-                show_menu
-                return
-            fi
-            manual_installation
+            install_argo_tunnel
             read -p "按回车键返回主菜单..." key
             show_menu
             ;;
         4)
-            stop_argo_fixed_tunnel
+            stop_argo_tunnel
             read -p "按回车键返回主菜单..." key
             show_menu
             ;;
         5)
-            check_argo_fixed_status
+            check_argo_status
             read -p "按回车键返回主菜单..." key
             show_menu
             ;;
@@ -566,17 +528,7 @@ show_menu() {
             show_menu
             ;;
         7)
-            echo -e "${yellow}正在清理所有配置...${plain}"
-            rm -f /usr/local/x-ui/cf_config.sh
-            rm -f /usr/local/x-ui/xuiargoympid.log
-            rm -f /usr/local/x-ui/xuiargoymport.log
-            rm -f /usr/local/x-ui/xuiargoym.log
-            rm -f /usr/local/x-ui/xuiargotoken.log
-            rm -f /usr/local/x-ui/cloudflared_config.yml
-            rm -f /usr/local/x-ui/credentials.json
-            rm -f /root/argo_fixed_tunnel_auto.sh
-            sed -i '/argo_fixed_tunnel_auto.sh/d' /etc/crontab 2>/dev/null
-            echo -e "${green}✅ 所有配置已清理${plain}"
+            cleanup_config
             read -p "按回车键返回主菜单..." key
             show_menu
             ;;
@@ -593,8 +545,7 @@ show_menu() {
 }
 
 # 脚本入口
-echo -e "${blue}Argo固定隧道自动化安装脚本 v3.0${plain}"
-echo -e "${blue}使用Cloudflare API实现全自动化部署${plain}"
+echo -e "${blue}Argo固定隧道安装脚本 v1.0${plain}"
 echo ""
 
 # 检查依赖
@@ -609,15 +560,6 @@ if ! command -v jq &> /dev/null; then
     else
         echo -e "${red}无法安装jq，请手动安装${plain}"
         exit 1
-    fi
-fi
-
-if ! command -v openssl &> /dev/null; then
-    echo -e "${yellow}正在安装openssl...${plain}"
-    if command -v apt-get &> /dev/null; then
-        apt-get install -y openssl
-    elif command -v yum &> /dev/null; then
-        yum install -y openssl
     fi
 fi
 
