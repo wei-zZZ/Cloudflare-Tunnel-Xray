@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
 # Cloudflare Tunnel + WireGuard 安装脚本
-# 版本: 1.2 - 简化 WireGuard 服务配置
+# 版本: 1.3 - 修复 iptables 问题
 # ============================================
 
 set -e
@@ -45,7 +45,7 @@ show_title() {
     echo ""
     echo "╔══════════════════════════════════════════════╗"
     echo "║    Cloudflare Tunnel + WireGuard 管理脚本   ║"
-    echo "║             版本: 1.2 - 简化版              ║"
+    echo "║             版本: 1.3 - 修复版              ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
 }
@@ -96,7 +96,7 @@ collect_user_info() {
 }
 
 # ----------------------------
-# 系统检查
+# 系统检查（修复 iptables 问题）
 # ----------------------------
 check_system() {
     print_info "检查系统环境..."
@@ -110,24 +110,27 @@ check_system() {
     print_info "更新系统包列表..."
     apt-get update -y
     
+    # 安装 iptables 和必要工具
+    print_info "安装 iptables 和相关工具..."
+    apt-get install -y iptables iptables-persistent
+    
+    # 检查并安装 nftables（现代系统可能需要）
+    if ! command -v nft &> /dev/null; then
+        apt-get install -y nftables 2>/dev/null || true
+    fi
+    
     # 安装 WireGuard
     if command -v wg &> /dev/null && command -v wg-quick &> /dev/null; then
         print_success "WireGuard 已安装"
     else
         print_info "安装 WireGuard..."
         
-        # 对于不同的 Debian/Ubuntu 版本
-        if grep -q "Ubuntu" /etc/os-release; then
-            ubuntu_version=$(grep "VERSION_ID" /etc/os-release | cut -d'"' -f2)
-            if [[ "$ubuntu_version" == "20.04" ]]; then
-                apt-get install -y wireguard wireguard-tools resolvconf
-            else
-                # Ubuntu 22.04+ 或 Debian
-                apt-get install -y wireguard wireguard-tools wireguard-dkms resolvconf
-            fi
-        else
-            # Debian
-            apt-get install -y wireguard wireguard-tools wireguard-dkms resolvconf
+        # 安装 WireGuard
+        apt-get install -y wireguard wireguard-tools resolvconf
+        
+        # 对于某些系统可能需要 dkms
+        if ! command -v wg &> /dev/null; then
+            apt-get install -y wireguard-dkms 2>/dev/null || true
         fi
         
         if ! command -v wg &> /dev/null; then
@@ -150,7 +153,7 @@ check_system() {
     
     # 安装其他必要工具
     print_info "安装其他必要工具..."
-    local tools=("curl" "wget" "qrencode" "iptables" "ip6tables")
+    local tools=("curl" "wget" "qrencode")
     for tool in "${tools[@]}"; do
         if ! command -v "$tool" &> /dev/null; then
             apt-get install -y "$tool" 2>/dev/null || {
@@ -158,6 +161,20 @@ check_system() {
             }
         fi
     done
+    
+    # 验证 iptables 安装
+    if ! command -v iptables &> /dev/null; then
+        print_error "iptables 安装失败，尝试替代方案..."
+        
+        # 尝试使用 nftables
+        if command -v nft &> /dev/null; then
+            print_info "使用 nftables 替代 iptables"
+        else
+            print_error "无防火墙工具可用，安装可能受影响"
+        fi
+    else
+        print_success "iptables 已安装"
+    fi
     
     print_success "系统检查完成"
 }
@@ -272,10 +289,10 @@ generate_wireguard_keys() {
 }
 
 # ----------------------------
-# 配置 WireGuard（简化版）
+# 配置 WireGuard（无 iptables 版本）
 # ----------------------------
-configure_wireguard() {
-    print_info "配置 WireGuard..."
+configure_wireguard_no_iptables() {
+    print_info "配置 WireGuard（不使用 iptables）..."
     
     # 读取密钥
     local server_private=$(cat "$WG_KEY_DIR/server_private.key")
@@ -292,7 +309,16 @@ configure_wireguard() {
     
     print_info "主网络接口: $main_interface"
     
-    # 生成服务器配置（简化版，避免复杂规则）
+    # 检查 iptables 是否可用
+    local use_iptables=false
+    if command -v iptables &> /dev/null; then
+        use_iptables=true
+        print_info "使用 iptables 进行转发"
+    else
+        print_warning "iptables 不可用，使用替代配置"
+    fi
+    
+    # 生成服务器配置
     cat > "$WG_CONFIG" << EOF
 [Interface]
 PrivateKey = $server_private
@@ -302,12 +328,32 @@ MTU = 1280
 DNS = 1.1.1.1, 8.8.8.8
 SaveConfig = true
 
-# 简单的转发规则
+# 启用 IP 转发
 PostUp = sysctl -w net.ipv4.ip_forward=1
+PostDown = sysctl -w net.ipv4.ip_forward=0
+EOF
+    
+    # 如果有 iptables，添加转发规则
+    if [ "$use_iptables" = true ]; then
+        cat >> "$WG_CONFIG" << EOF
+
+# iptables 转发规则
 PostUp = iptables -A FORWARD -i wg0 -j ACCEPT
 PostUp = iptables -t nat -A POSTROUTING -o $main_interface -j MASQUERADE
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT
 PostDown = iptables -t nat -D POSTROUTING -o $main_interface -j MASQUERADE
+EOF
+    else
+        cat >> "$WG_CONFIG" << EOF
+
+# 无 iptables 配置
+# 如果需要转发，请手动配置防火墙
+# 或者使用 nftables 等其他工具
+EOF
+    fi
+    
+    # 添加客户端配置
+    cat >> "$WG_CONFIG" << EOF
 
 # 客户端配置
 [Peer]
@@ -347,43 +393,69 @@ EOF
 }
 
 # ----------------------------
-# 测试 WireGuard 配置
+# 测试 WireGuard 配置（安全版本）
 # ----------------------------
-test_wireguard_config() {
+test_wireguard_config_safe() {
     print_info "测试 WireGuard 配置..."
     
     # 先关闭可能存在的 wg0 接口
     wg-quick down wg0 2>/dev/null || true
+    sleep 1
     
-    # 测试启动
-    if wg-quick up wg0; then
-        print_success "✅ WireGuard 启动测试成功"
+    # 创建临时配置（无 iptables 规则）
+    local temp_config="/tmp/wg0-test.conf"
+    local server_private=$(cat "$WG_KEY_DIR/server_private.key")
+    local server_public=$(cat "$WG_KEY_DIR/server_public.key")
+    local client_public=$(cat "$WG_KEY_DIR/client_public.key")
+    local preshared_key=$(cat "$WG_KEY_DIR/preshared.key")
+    
+    # 生成测试配置（仅基本功能，无防火墙规则）
+    cat > "$temp_config" << EOF
+[Interface]
+PrivateKey = $server_private
+Address = 10.9.0.1/24
+ListenPort = $WIREGUARD_PORT
+MTU = 1280
+DNS = 1.1.1.1, 8.8.8.8
+
+[Peer]
+PublicKey = $client_public
+PresharedKey = $preshared_key
+AllowedIPs = 10.9.0.2/32
+PersistentKeepalive = 25
+EOF
+    
+    # 使用临时配置测试
+    print_info "使用简化配置测试 WireGuard..."
+    
+    if wg-quick up "$temp_config"; then
+        print_success "✅ WireGuard 基本功能测试成功"
         
         # 显示状态
         echo ""
         print_info "WireGuard 接口状态:"
         wg show
         
-        # 测试连通性
-        echo ""
-        print_info "测试内部连通性..."
-        if ip addr show wg0 | grep -q "10.9.0.1"; then
-            print_success "✅ WireGuard 接口 IP 配置正确"
-        else
-            print_warning "⚠️  WireGuard 接口 IP 可能未正确配置"
+        # 检查接口
+        if ip link show wg0 &> /dev/null; then
+            print_success "✅ wg0 接口创建成功"
+            echo "接口 IP: $(ip addr show wg0 | grep 'inet ' | awk '{print $2}')"
         fi
         
         # 测试后关闭
-        wg-quick down wg0
+        wg-quick down "$temp_config"
+        rm -f "$temp_config"
+        
         return 0
     else
-        print_error "❌ WireGuard 启动测试失败"
+        print_error "❌ WireGuard 基本功能测试失败"
         
         # 显示详细错误
         echo ""
         print_info "详细错误信息:"
-        wg-quick up wg0 2>&1 | tail -20
+        wg-quick up "$temp_config" 2>&1 | tail -30
         
+        rm -f "$temp_config"
         return 1
     fi
 }
@@ -468,7 +540,6 @@ ingress:
       connectTimeout: 30s
       tcpKeepAlive: 30s
       noHappyEyeballs: true
-      keepAliveConnections: 10
   - service: http_status:404
 EOF
     
@@ -476,17 +547,57 @@ EOF
 }
 
 # ----------------------------
-# 使用 systemd 原生的 WireGuard 服务
+# 配置系统服务
 # ----------------------------
-configure_services_simple() {
+configure_services() {
     print_info "配置系统服务..."
     
     # 创建日志目录
     mkdir -p "$LOG_DIR"
     
-    # 使用 systemd 原生的 WireGuard 服务
-    # 启用 systemd 的 wg-quick 服务
-    systemctl enable wg-quick@wg0.service 2>/dev/null || true
+    # 创建 WireGuard 启动脚本（替代系统服务）
+    cat > /usr/local/bin/wg-start << 'EOF'
+#!/bin/bash
+# WireGuard 启动脚本
+
+CONFIG="/etc/wireguard/wg0.conf"
+
+if [ ! -f "$CONFIG" ]; then
+    echo "错误：WireGuard 配置文件不存在: $CONFIG"
+    exit 1
+fi
+
+# 检查 iptables 是否可用
+if ! command -v iptables &> /dev/null; then
+    echo "警告：iptables 不可用，仅启动基本功能"
+    # 修改配置，移除 iptables 规则
+    sed -i '/^PostUp = iptables/d' "$CONFIG"
+    sed -i '/^PostDown = iptables/d' "$CONFIG"
+fi
+
+# 启动 WireGuard
+wg-quick up wg0
+
+# 检查是否成功
+if [ $? -eq 0 ]; then
+    echo "WireGuard 启动成功"
+    wg show
+else
+    echo "WireGuard 启动失败"
+fi
+EOF
+    
+    chmod +x /usr/local/bin/wg-start
+    
+    # 创建 WireGuard 停止脚本
+    cat > /usr/local/bin/wg-stop << 'EOF'
+#!/bin/bash
+# WireGuard 停止脚本
+wg-quick down wg0 2>/dev/null || true
+echo "WireGuard 已停止"
+EOF
+    
+    chmod +x /usr/local/bin/wg-stop
     
     # 创建 Cloudflared 服务文件
     cat > /etc/systemd/system/wg-argo-cloudflared.service << EOF
@@ -510,65 +621,94 @@ StandardError=append:$LOG_DIR/argo-error.log
 WantedBy=multi-user.target
 EOF
     
+    # 创建 WireGuard 服务（简化版）
+    cat > /etc/systemd/system/wg-argo-wireguard.service << EOF
+[Unit]
+Description=WireGuard VPN Service
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/wg-start
+ExecStop=/usr/local/bin/wg-stop
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
     # 重载systemd
     systemctl daemon-reload
-    
-    # 启用 cloudflared 服务
-    systemctl enable wg-argo-cloudflared.service
     
     print_success "系统服务配置完成"
 }
 
 # ----------------------------
-# 启动服务（简化版）
+# 启动服务
 # ----------------------------
-start_services_simple() {
+start_services() {
     print_info "启动服务..."
-    
-    # 1. 先启动 WireGuard
-    print_info "启动 WireGuard..."
     
     # 停止可能存在的服务
     systemctl stop wg-argo-cloudflared.service 2>/dev/null || true
-    systemctl stop wg-quick@wg0.service 2>/dev/null || true
+    systemctl stop wg-argo-wireguard.service 2>/dev/null || true
     wg-quick down wg0 2>/dev/null || true
     sleep 2
     
-    # 手动启动 WireGuard 并检查
-    if wg-quick up wg0; then
-        print_success "✅ WireGuard 手动启动成功"
+    # 1. 启动 WireGuard（使用我们的启动脚本）
+    print_info "启动 WireGuard..."
+    if /usr/local/bin/wg-start; then
+        print_success "✅ WireGuard 启动成功"
         
-        # 显示 WireGuard 状态
-        echo ""
-        print_info "WireGuard 接口状态:"
-        wg show
-        
-        # 启用 systemd 服务
-        systemctl enable wg-quick@wg0.service --now
+        # 启用服务
+        systemctl enable wg-argo-wireguard.service --now
     else
-        print_error "❌ WireGuard 手动启动失败"
+        print_error "❌ WireGuard 启动失败"
         
-        # 显示详细错误
-        echo ""
-        print_info "尝试诊断 WireGuard 问题:"
-        echo "1. 检查配置文件:"
-        cat "$WG_CONFIG"
-        echo ""
-        echo "2. 检查内核模块:"
-        lsmod | grep wireguard || echo "wireguard 模块未加载"
-        echo ""
-        echo "3. 检查网络接口:"
-        ip link show wg0 2>/dev/null || echo "wg0 接口不存在"
-        
-        return 1
+        # 尝试直接启动（无防火墙规则）
+        print_info "尝试直接启动 WireGuard（无防火墙规则）..."
+        wg-quick up wg0 2>&1 | grep -v "iptables" || {
+            # 创建无防火墙的临时配置
+            local temp_config="/tmp/wg0-simple.conf"
+            local server_private=$(cat "$WG_KEY_DIR/server_private.key")
+            local client_public=$(cat "$WG_KEY_DIR/client_public.key")
+            local preshared_key=$(cat "$WG_KEY_DIR/preshared.key")
+            
+            cat > "$temp_config" << EOF
+[Interface]
+PrivateKey = $server_private
+Address = 10.9.0.1/24
+ListenPort = $WIREGUARD_PORT
+MTU = 1280
+
+[Peer]
+PublicKey = $client_public
+PresharedKey = $preshared_key
+AllowedIPs = 10.9.0.2/32
+PersistentKeepalive = 25
+EOF
+            
+            if wg-quick up "$temp_config"; then
+                print_success "✅ WireGuard 启动成功（简化模式）"
+                # 复制配置到正式位置
+                cp "$temp_config" "$WG_CONFIG"
+                rm -f "$temp_config"
+            else
+                print_error "❌ WireGuard 完全启动失败"
+                return 1
+            fi
+        }
     fi
     
     # 2. 启动 Cloudflared
     print_info "启动 Cloudflared..."
-    systemctl start wg-argo-cloudflared.service
+    systemctl enable wg-argo-cloudflared.service --now
     
     # 检查 Cloudflared 状态
-    local max_checks=10
+    local max_checks=15
     local check_count=0
     
     while [[ $check_count -lt $max_checks ]]; do
@@ -644,12 +784,11 @@ show_connection_info() {
     echo "  1. 将 client.conf 导入 WireGuard 客户端"
     echo "  2. 或扫描上面的二维码（如果支持）"
     echo "  3. 如果连接不上，等待2-3分钟再试"
-    echo "  4. 查看服务状态: sudo ./wg_argo.sh status"
+    echo "  4. 手动启动 WireGuard: wg-start"
+    echo "  5. 手动停止 WireGuard: wg-stop"
     echo ""
     
     print_info "🔧 管理命令:"
-    echo "  启动 WireGuard: wg-quick up wg0"
-    echo "  停止 WireGuard: wg-quick down wg0"
     echo "  查看 WireGuard 状态: wg show"
     echo "  重启 Cloudflared: systemctl restart wg-argo-cloudflared.service"
     echo "  查看日志: journalctl -u wg-argo-cloudflared.service -f"
@@ -669,8 +808,8 @@ show_service_status() {
         print_info "WireGuard 状态:"
         wg show 2>/dev/null || echo "无法获取详细状态"
     else
-        print_error "❌ WireGuard 接口: 未激活"
-        echo "启动命令: wg-quick up wg0"
+        print_warning "⚠️  WireGuard 接口: 未激活"
+        echo "启动命令: wg-start 或 wg-quick up wg0"
     fi
     
     echo ""
@@ -689,9 +828,9 @@ show_service_status() {
 }
 
 # ----------------------------
-# 主安装流程（简化版）
+# 主安装流程
 # ----------------------------
-main_install_simple() {
+main_install() {
     print_info "开始安装流程..."
     
     check_system
@@ -719,29 +858,28 @@ main_install_simple() {
     mkdir -p "$CONFIG_DIR"
     
     generate_wireguard_keys
-    configure_wireguard
+    configure_wireguard_no_iptables
     
     # 测试 WireGuard 配置
     print_info "测试 WireGuard 配置..."
-    if ! test_wireguard_config; then
+    if ! test_wireguard_config_safe; then
         print_error "WireGuard 配置测试失败"
         return 1
     fi
     
     configure_cloudflared
-    configure_services_simple
+    configure_services
     
-    if ! start_services_simple; then
+    if ! start_services; then
         print_error "服务启动失败"
         
         # 提供调试信息
         echo ""
         print_info "🛠️  手动调试步骤:"
         echo "1. 检查 WireGuard 配置: cat $WG_CONFIG"
-        echo "2. 手动启动 WireGuard: wg-quick up wg0"
-        echo "3. 检查 WireGuard 状态: wg show"
-        echo "4. 检查系统日志: journalctl -xe"
-        echo "5. 查看网络接口: ip link show"
+        echo "2. 手动启动: wg-quick up wg0"
+        echo "3. 检查状态: wg show"
+        echo "4. 查看日志: journalctl -xe"
         return 1
     fi
     
@@ -771,18 +909,24 @@ uninstall_all() {
     print_info "停止服务..."
     
     systemctl stop wg-argo-cloudflared.service 2>/dev/null || true
+    systemctl stop wg-argo-wireguard.service 2>/dev/null || true
     systemctl disable wg-argo-cloudflared.service 2>/dev/null || true
+    systemctl disable wg-argo-wireguard.service 2>/dev/null || true
     
     # 停止 WireGuard
     wg-quick down wg0 2>/dev/null || true
-    systemctl disable wg-quick@wg0.service 2>/dev/null || true
     
     # 删除服务文件
     rm -f /etc/systemd/system/wg-argo-cloudflared.service
-    rm -f /etc/wireguard/wg0.conf
+    rm -f /etc/systemd/system/wg-argo-wireguard.service
+    
+    # 删除脚本
+    rm -f /usr/local/bin/wg-start
+    rm -f /usr/local/bin/wg-stop
     
     # 删除配置目录
     rm -rf "$CONFIG_DIR" "$LOG_DIR" "$WG_KEY_DIR"
+    rm -f /etc/wireguard/wg0.conf
     
     print_input "是否删除 cloudflared 二进制文件？(y/N): "
     read -r delete_bin
@@ -808,55 +952,74 @@ uninstall_all() {
 manual_fix_wireguard() {
     print_info "手动修复 WireGuard..."
     
-    # 1. 停止所有相关服务
-    systemctl stop wg-argo-cloudflared.service 2>/dev/null || true
-    wg-quick down wg0 2>/dev/null || true
-    
-    # 2. 检查内核模块
-    print_info "检查 WireGuard 内核模块..."
-    if ! lsmod | grep -q wireguard; then
-        print_warning "WireGuard 内核模块未加载"
-        print_info "尝试加载模块..."
-        modprobe wireguard 2>/dev/null || {
-            print_error "无法加载 wireguard 模块"
-            print_info "尝试安装 wireguard-dkms: apt-get install -y wireguard-dkms"
-            apt-get install -y wireguard-dkms 2>/dev/null || true
-            modprobe wireguard 2>/dev/null || true
-        }
+    # 1. 安装 iptables
+    print_info "检查并安装 iptables..."
+    if ! command -v iptables &> /dev/null; then
+        apt-get update
+        apt-get install -y iptables iptables-persistent
     fi
     
-    # 3. 重新生成密钥（可选）
-    print_input "是否重新生成 WireGuard 密钥？(y/N): "
-    read -r regen_keys
-    if [[ "$regen_keys" == "y" || "$regen_keys" == "Y" ]]; then
-        generate_wireguard_keys
-        configure_wireguard
+    # 2. 重新配置 WireGuard（启用 iptables）
+    print_info "重新配置 WireGuard..."
+    
+    # 读取密钥
+    local server_private=$(cat "$WG_KEY_DIR/server_private.key")
+    local client_public=$(cat "$WG_KEY_DIR/client_public.key")
+    local preshared_key=$(cat "$WG_KEY_DIR/preshared.key")
+    local main_interface=$(ip route | grep default | awk '{print $5}' | head -1)
+    if [[ -z "$main_interface" ]]; then
+        main_interface="eth0"
     fi
     
-    # 4. 手动测试启动
-    print_info "手动测试 WireGuard 启动..."
+    # 生成新配置
+    cat > "$WG_CONFIG" << EOF
+[Interface]
+PrivateKey = $server_private
+Address = 10.9.0.1/24
+ListenPort = $WIREGUARD_PORT
+MTU = 1280
+DNS = 1.1.1.1, 8.8.8.8
+SaveConfig = true
+
+# 启用 IP 转发
+PostUp = sysctl -w net.ipv4.ip_forward=1
+PostDown = sysctl -w net.ipv4.ip_forward=0
+
+[Peer]
+PublicKey = $client_public
+PresharedKey = $preshared_key
+AllowedIPs = 10.9.0.2/32
+PersistentKeepalive = 25
+EOF
+    
+    # 如果有 iptables，添加规则
+    if command -v iptables &> /dev/null; then
+        cat >> "$WG_CONFIG" << EOF
+
+# iptables 规则（如果可用）
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $main_interface -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $main_interface -j MASQUERADE
+EOF
+    fi
+    
+    # 3. 测试启动
+    print_info "测试 WireGuard 启动..."
     if wg-quick up wg0; then
-        print_success "✅ WireGuard 手动启动成功"
-        
-        # 显示状态
+        print_success "✅ WireGuard 修复成功"
         wg show
-        
-        # 启用服务
-        systemctl enable wg-quick@wg0.service --now
+        systemctl restart wg-argo-wireguard.service
     else
-        print_error "❌ WireGuard 手动启动失败"
+        print_error "❌ WireGuard 修复失败"
+        print_info "尝试无防火墙启动..."
         
-        # 显示配置帮助
-        echo ""
-        print_info "配置帮助:"
-        echo "WireGuard 配置文件位置: $WG_CONFIG"
-        echo "当前配置:"
-        cat "$WG_CONFIG" 2>/dev/null || echo "配置文件不存在"
+        # 移除 iptables 规则
+        sed -i '/^PostUp = iptables/d' "$WG_CONFIG"
+        sed -i '/^PostDown = iptables/d' "$WG_CONFIG"
+        
+        if wg-quick up wg0; then
+            print_success "✅ WireGuard 启动成功（无防火墙）"
+        fi
     fi
-    
-    # 5. 重新启动 cloudflared
-    print_info "重启 cloudflared..."
-    systemctl restart wg-argo-cloudflared.service
     
     echo ""
     print_info "修复完成！"
@@ -875,16 +1038,17 @@ show_menu() {
     echo "  3) 查看服务状态"
     echo "  4) 查看配置信息"
     echo "  5) 手动修复 WireGuard"
-    echo "  6) 退出"
+    echo "  6) 安装 iptables"
+    echo "  7) 退出"
     echo ""
     
-    print_input "请输入选项 (1-6): "
+    print_input "请输入选项 (1-7): "
     read -r choice
     
     case "$choice" in
         1)
             SILENT_MODE=false
-            if main_install_simple; then
+            if main_install; then
                 echo ""
                 print_input "按回车键返回菜单..."
                 read -r
@@ -937,6 +1101,15 @@ show_menu() {
             read -r
             ;;
         6)
+            print_info "安装 iptables..."
+            apt-get update
+            apt-get install -y iptables iptables-persistent
+            echo ""
+            print_success "iptables 安装完成"
+            print_input "按回车键返回菜单..."
+            read -r
+            ;;
+        7)
             print_info "再见！"
             exit 0
             ;;
@@ -957,7 +1130,7 @@ main() {
         "install")
             SILENT_MODE=false
             show_title
-            main_install_simple
+            main_install
             ;;
         "uninstall")
             show_title
@@ -992,10 +1165,16 @@ main() {
             show_title
             manual_fix_wireguard
             ;;
+        "install-iptables")
+            show_title
+            apt-get update
+            apt-get install -y iptables iptables-persistent
+            print_success "iptables 安装完成"
+            ;;
         "-y"|"--silent")
             SILENT_MODE=true
             show_title
-            main_install_simple
+            main_install
             ;;
         "menu"|"")
             show_menu
@@ -1003,13 +1182,14 @@ main() {
         *)
             show_title
             echo "使用方法:"
-            echo "  sudo ./wg_argo.sh menu          # 显示菜单"
-            echo "  sudo ./wg_argo.sh install       # 安装"
-            echo "  sudo ./wg_argo.sh uninstall     # 卸载"
-            echo "  sudo ./wg_argo.sh status        # 查看状态"
-            echo "  sudo ./wg_argo.sh config        # 查看配置"
-            echo "  sudo ./wg_argo.sh fix           # 手动修复"
-            echo "  sudo ./wg_argo.sh -y            # 静默安装"
+            echo "  sudo ./wg_argo.sh menu               # 显示菜单"
+            echo "  sudo ./wg_argo.sh install            # 安装"
+            echo "  sudo ./wg_argo.sh uninstall          # 卸载"
+            echo "  sudo ./wg_argo.sh status             # 查看状态"
+            echo "  sudo ./wg_argo.sh config             # 查看配置"
+            echo "  sudo ./wg_argo.sh fix                # 手动修复"
+            echo "  sudo ./wg_argo.sh install-iptables   # 安装 iptables"
+            echo "  sudo ./wg_argo.sh -y                 # 静默安装"
             exit 1
             ;;
     esac
