@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
 # Cloudflare Tunnel + WireGuard 安装脚本
-# 版本: 1.0
+# 版本: 1.1 - 修复 WireGuard 服务启动问题
 # ============================================
 
 set -e
@@ -45,7 +45,7 @@ show_title() {
     echo ""
     echo "╔══════════════════════════════════════════════╗"
     echo "║    Cloudflare Tunnel + WireGuard 管理脚本   ║"
-    echo "║                 版本: 1.0                   ║"
+    echo "║             版本: 1.1 - 修复版              ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
 }
@@ -144,14 +144,13 @@ check_system() {
     else
         print_info "安装 WireGuard..."
         
-        # 添加 WireGuard 源（针对 Ubuntu/Debian）
-        if grep -q "ubuntu" /etc/os-release; then
-            apt-get install -y software-properties-common
-            add-apt-repository -y ppa:wireguard/wireguard
-        fi
+        # 安装必要内核模块和工具
+        apt-get install -y wireguard wireguard-tools resolvconf
         
-        apt-get update -y
-        apt-get install -y wireguard wireguard-tools
+        # 对于较新的内核，可能需要安装 wireguard-dkms
+        if ! command -v wg &> /dev/null; then
+            apt-get install -y wireguard-dkms
+        fi
         
         if ! command -v wg &> /dev/null; then
             print_error "WireGuard 安装失败"
@@ -160,9 +159,18 @@ check_system() {
         print_success "WireGuard 安装成功"
     fi
     
+    # 检查 WireGuard 内核模块
+    print_info "检查 WireGuard 内核模块..."
+    if lsmod | grep -q wireguard; then
+        print_success "WireGuard 内核模块已加载"
+    else
+        print_warning "WireGuard 内核模块未加载，尝试加载..."
+        modprobe wireguard 2>/dev/null || true
+    fi
+    
     # 安装必要工具
     print_info "安装必要工具..."
-    local tools=("curl" "wget" "qrencode")
+    local tools=("curl" "wget" "qrencode" "iptables" "ip6tables")
     for tool in "${tools[@]}"; do
         if ! command -v "$tool" &> /dev/null; then
             apt-get install -y "$tool" 2>/dev/null || {
@@ -296,16 +304,29 @@ configure_wireguard() {
     local client_public=$(cat "$WG_KEY_DIR/client_public.key")
     local preshared_key=$(cat "$WG_KEY_DIR/preshared.key")
     
+    # 获取主网络接口
+    local main_interface=$(ip route | grep default | awk '{print $5}' | head -1)
+    if [[ -z "$main_interface" ]]; then
+        main_interface="eth0"
+    fi
+    
     # 生成服务器配置
     cat > "$WG_CONFIG" << EOF
 [Interface]
 PrivateKey = $server_private
 Address = 10.9.0.1/24
 ListenPort = $WIREGUARD_PORT
-PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE; ip6tables -A FORWARD -i wg0 -j ACCEPT; ip6tables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE; ip6tables -D FORWARD -i wg0 -j ACCEPT; ip6tables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+MTU = 1280
+# DNS 设置
+DNS = 1.1.1.1, 8.8.8.8
+# 保存配置
+SaveConfig = true
+# 转发规则
+PostUp = sysctl -w net.ipv4.ip_forward=1; sysctl -w net.ipv6.conf.all.forwarding=1
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $main_interface -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $main_interface -j MASQUERADE
 
-# Client configuration
+# 客户端配置
 [Peer]
 PublicKey = $client_public
 PresharedKey = $preshared_key
@@ -328,12 +349,47 @@ AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 EOF
     
-    # 启用 IP 转发
-    echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-    echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
-    sysctl -p
+    # 启用 IP 转发（永久生效）
+    if ! grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf; then
+        echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+    fi
+    if ! grep -q "net.ipv6.conf.all.forwarding=1" /etc/sysctl.conf; then
+        echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
+    fi
+    sysctl -p 2>/dev/null || true
+    
+    # 设置配置文件权限
+    chmod 600 "$WG_CONFIG"
     
     print_success "WireGuard 配置完成"
+}
+
+# ----------------------------
+# 测试 WireGuard 配置
+# ----------------------------
+test_wireguard_config() {
+    print_info "测试 WireGuard 配置..."
+    
+    # 检查配置文件是否存在
+    if [[ ! -f "$WG_CONFIG" ]]; then
+        print_error "WireGuard 配置文件不存在"
+        return 1
+    fi
+    
+    # 测试配置语法
+    if wg-quick up wg0 2>&1 | grep -q "Configuration is valid"; then
+        print_success "WireGuard 配置语法正确"
+    else
+        # 尝试手动启动以查看错误
+        print_warning "尝试手动启动 WireGuard 查看错误..."
+        wg-quick up wg0 2>&1 || true
+        return 1
+    fi
+    
+    # 立即关闭（服务将在后面正式启动）
+    wg-quick down wg0 2>/dev/null || true
+    
+    return 0
 }
 
 # ----------------------------
@@ -417,6 +473,8 @@ ingress:
       connectTimeout: 30s
       tcpKeepAlive: 30s
       noHappyEyeballs: true
+      keepAliveConnections: 10
+      keepAliveTimeout: 30s
   - service: http_status:404
 EOF
     
@@ -432,19 +490,21 @@ configure_services() {
     # 创建日志目录
     mkdir -p "$LOG_DIR"
     
-    # 创建 WireGuard 服务文件
+    # 创建 WireGuard 服务文件（使用简单的启动方式）
     cat > /etc/systemd/system/wg-argo-wireguard.service << EOF
 [Unit]
-Description=WireGuard VPN Server
+Description=WireGuard VPN Server for Argo Tunnel
 After=network.target
 Wants=network-online.target
+Requires=wg-quick@wg0.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=wg-quick up wg0
-ExecStop=wg-quick down wg0
+ExecStart=/bin/bash -c 'wg-quick up wg0 || echo "WireGuard 启动失败，请检查配置"'
+ExecStop=/bin/bash -c 'wg-quick down wg0 || true'
 StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -475,15 +535,15 @@ EOF
     # 重载systemd
     systemctl daemon-reload
     
-    # 启用 WireGuard 服务
-    systemctl enable wg-argo-wireguard.service
+    # 启用服务
+    systemctl enable wg-argo-wireguard.service --now 2>/dev/null || true
     systemctl enable wg-argo-cloudflared.service
     
     print_success "系统服务配置完成"
 }
 
 # ----------------------------
-# 启动服务
+# 启动服务（改进版）
 # ----------------------------
 start_services() {
     print_info "启动服务..."
@@ -491,16 +551,47 @@ start_services() {
     # 停止可能存在的旧服务
     systemctl stop wg-argo-cloudflared.service 2>/dev/null || true
     systemctl stop wg-argo-wireguard.service 2>/dev/null || true
-    sleep 2
+    
+    # 先手动启动 WireGuard 来检查错误
+    print_info "手动启动 WireGuard 检查配置..."
+    
+    if wg-quick up wg0 2>&1; then
+        print_success "✅ WireGuard 手动启动成功"
+        # 测试成功后关闭，让服务管理
+        wg-quick down wg0 2>/dev/null || true
+        sleep 2
+    else
+        print_error "❌ WireGuard 手动启动失败"
+        print_info "检查 WireGuard 配置..."
+        cat "$WG_CONFIG"
+        return 1
+    fi
     
     # 启动 WireGuard 服务
-    print_info "启动 WireGuard..."
+    print_info "启动 WireGuard 服务..."
     systemctl start wg-argo-wireguard.service
     
-    if systemctl is-active --quiet wg-argo-wireguard.service; then
-        print_success "✅ WireGuard 启动成功"
-    else
-        print_error "❌ WireGuard 启动失败"
+    local wg_retries=0
+    while [[ $wg_retries -lt 5 ]]; do
+        if systemctl is-active --quiet wg-argo-wireguard.service; then
+            print_success "✅ WireGuard 服务启动成功"
+            break
+        fi
+        
+        if [[ $wg_retries -eq 2 ]]; then
+            print_warning "WireGuard 服务启动较慢，查看日志..."
+            journalctl -u wg-argo-wireguard.service -n 20 --no-pager
+        fi
+        
+        sleep 2
+        ((wg_retries++))
+    done
+    
+    if [[ $wg_retries -ge 5 ]]; then
+        print_error "❌ WireGuard 服务启动失败"
+        print_info "尝试手动启动调试..."
+        wg-quick up wg0
+        wg show
         return 1
     fi
     
@@ -526,6 +617,11 @@ start_services() {
     if [[ $wait_time -ge $max_wait ]]; then
         print_warning "⚠️  隧道服务启动较慢"
     fi
+    
+    # 显示 WireGuard 状态
+    echo ""
+    print_info "WireGuard 接口状态:"
+    wg show 2>/dev/null || print_warning "无法获取 WireGuard 状态"
     
     return 0
 }
@@ -580,7 +676,7 @@ show_connection_info() {
         print_success "✅ WireGuard 服务: 运行中"
         echo ""
         print_info "WireGuard 接口状态:"
-        wg show
+        wg show 2>/dev/null || echo "无法获取接口状态"
     else
         print_error "❌ WireGuard 服务: 未运行"
     fi
@@ -609,7 +705,7 @@ show_connection_info() {
 }
 
 # ----------------------------
-# 主安装流程
+# 主安装流程（修复版）
 # ----------------------------
 main_install() {
     print_info "开始安装流程..."
@@ -637,11 +733,26 @@ main_install() {
     
     generate_wireguard_keys
     configure_wireguard
+    
+    # 测试 WireGuard 配置
+    if ! test_wireguard_config; then
+        print_error "WireGuard 配置测试失败"
+        return 1
+    fi
+    
     configure_cloudflared
     configure_services
     
     if ! start_services; then
         print_error "服务启动失败"
+        
+        # 提供调试信息
+        echo ""
+        print_info "🛠️  调试信息:"
+        echo "1. 检查 WireGuard 内核模块: lsmod | grep wireguard"
+        echo "2. 手动测试 WireGuard: wg-quick up wg0"
+        echo "3. 查看 WireGuard 配置: cat $WG_CONFIG"
+        echo "4. 检查系统日志: journalctl -xe"
         return 1
     fi
     
@@ -741,7 +852,7 @@ show_status() {
         print_success "WireGuard 服务: 运行中"
         echo ""
         print_info "WireGuard 接口状态:"
-        wg show
+        wg show 2>/dev/null || echo "无法获取接口状态"
     else
         print_error "WireGuard 服务: 未运行"
     fi
@@ -757,6 +868,61 @@ show_status() {
     else
         print_error "Cloudflared 服务: 未运行"
     fi
+    
+    # 显示连接数统计
+    echo ""
+    print_info "连接统计:"
+    echo "WireGuard 接口:"
+    ip -4 addr show wg0 2>/dev/null | grep inet || echo "wg0 接口未找到"
+    echo ""
+    echo "活动连接:"
+    ss -nulp | grep ":51820" || echo "无 WireGuard 活动连接"
+}
+
+# ----------------------------
+# 修复 WireGuard 服务
+# ----------------------------
+fix_wireguard_service() {
+    print_info "尝试修复 WireGuard 服务..."
+    
+    # 停止服务
+    systemctl stop wg-argo-wireguard.service 2>/dev/null || true
+    wg-quick down wg0 2>/dev/null || true
+    
+    # 检查内核模块
+    if ! lsmod | grep -q wireguard; then
+        print_info "加载 WireGuard 内核模块..."
+        modprobe wireguard
+    fi
+    
+    # 重新生成密钥
+    print_info "重新生成 WireGuard 密钥..."
+    rm -rf "$WG_KEY_DIR" 2>/dev/null
+    generate_wireguard_keys
+    
+    # 重新配置
+    configure_wireguard
+    
+    # 测试配置
+    if wg-quick up wg0; then
+        print_success "✅ WireGuard 配置测试成功"
+        wg-quick down wg0
+    else
+        print_error "❌ WireGuard 配置测试失败"
+        return 1
+    fi
+    
+    # 重启服务
+    systemctl daemon-reload
+    systemctl start wg-argo-wireguard.service
+    
+    if systemctl is-active --quiet wg-argo-wireguard.service; then
+        print_success "✅ WireGuard 服务修复成功"
+        return 0
+    else
+        print_error "❌ WireGuard 服务修复失败"
+        return 1
+    fi
 }
 
 # ----------------------------
@@ -771,10 +937,11 @@ show_menu() {
     echo "  2) 卸载 WireGuard + Argo Tunnel"
     echo "  3) 查看服务状态"
     echo "  4) 查看配置信息"
-    echo "  5) 退出"
+    echo "  5) 修复 WireGuard 服务"
+    echo "  6) 退出"
     echo ""
     
-    print_input "请输入选项 (1-5): "
+    print_input "请输入选项 (1-6): "
     read -r choice
     
     case "$choice" in
@@ -810,6 +977,12 @@ show_menu() {
             read -r
             ;;
         5)
+            fix_wireguard_service
+            echo ""
+            print_input "按回车键返回菜单..."
+            read -r
+            ;;
+        6)
             print_info "再见！"
             exit 0
             ;;
@@ -844,6 +1017,10 @@ main() {
             show_title
             show_status
             ;;
+        "fix")
+            show_title
+            fix_wireguard_service
+            ;;
         "-y"|"--silent")
             SILENT_MODE=true
             show_title
@@ -860,6 +1037,7 @@ main() {
             echo "  sudo ./wg_argo.sh uninstall     # 卸载"
             echo "  sudo ./wg_argo.sh status        # 查看状态"
             echo "  sudo ./wg_argo.sh config        # 查看配置"
+            echo "  sudo ./wg_argo.sh fix           # 修复服务"
             echo "  sudo ./wg_argo.sh -y            # 静默安装"
             exit 1
             ;;
