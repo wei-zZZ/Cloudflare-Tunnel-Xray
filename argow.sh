@@ -1,904 +1,875 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# ============================================
+# Cloudflare Tunnel + WireGuard 安装脚本
+# 版本: 1.0
+# ============================================
 
-# 当前脚本版本号
-VERSION='1.0.0 (2025.12.09)'
+set -e
 
-# 各变量默认值
-GH_PROXY='https://hub.glowp.xyz/'
-WORK_DIR='/etc/argowg'
-TEMP_DIR='/tmp/argowg'
-TLS_SERVER='addons.mozilla.org'
-METRICS_PORT='3333'
-CDN_DOMAIN=("skk.moe" "ip.sb" "time.is" "cfip.xxxxxxxx.tk" "bestcf.top" "cdn.2020111.xyz" "xn--b6gac.eu.org" "cf.090227.xyz")
-SUBSCRIBE_TEMPLATE="https://raw.githubusercontent.com/fscarmen/client_template/main"
+# ----------------------------
+# 颜色输出
+# ----------------------------
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
 
-export DEBIAN_FRONTEND=noninteractive
+print_info() { echo -e "${BLUE}[*]${NC} $1"; }
+print_success() { echo -e "${GREEN}[+]${NC} $1"; }
+print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
+print_error() { echo -e "${RED}[-]${NC} $1"; }
+print_input() { echo -e "${CYAN}[?]${NC} $1"; }
+print_auth() { echo -e "${GREEN}[🔐]${NC} $1"; }
 
-trap "rm -rf $TEMP_DIR; echo -e '\n' ;exit 1" INT QUIT TERM EXIT
+# ----------------------------
+# 配置变量
+# ----------------------------
+CONFIG_DIR="/etc/wg-argo"
+LOG_DIR="/var/log/wg-argo"
+WG_CONFIG="/etc/wireguard/wg0.conf"
+WG_KEY_DIR="/etc/wireguard/keys"
+BIN_DIR="/usr/local/bin"
 
-mkdir -p $TEMP_DIR
+USER_DOMAIN=""
+TUNNEL_NAME="wg-argo-tunnel"
+WIREGUARD_PORT=51820
+SILENT_MODE=false
 
-E[0]="Language:\n 1. English (default) \n 2. 简体中文"
-C[0]="${E[0]}"
-E[1]="Quick Install Mode: Added a one-click installation feature that auto-fills all parameters, simplifying the deployment process. Chinese users can use -l or -L; English users can use -k or -K. Case-insensitive support makes operations more flexible."
-C[1]="极速安装模式：新增一键安装功能，所有参数自动填充，简化部署流程。中文用户使用 -l 或 -L，英文用户使用 -k 或 -K，大小写均支持，操作更灵活"
-E[2]="Project to create Argo tunnels and WireGuard specifically for VPS, detailed:[https://github.com/fscarmen/argowg]\n Features:\n\t • Allows the creation of Argo tunnels via Token, Json and ad hoc methods. User can easily obtain the json at https://fscarmen.cloudflare.now.cc .\n\t • Extremely fast installation method, saving users time.\n\t • Support system: Ubuntu, Debian, CentOS, Alpine and Arch Linux 3.\n\t • Support architecture: AMD,ARM and s390x\n"
-C[2]="本项目专为 VPS 添加 Argo 隧道及 WireGuard,详细说明: [https://github.com/fscarmen/argowg]\n 脚本特点:\n\t • 允许通过 Token, Json 及 临时方式来创建 Argo 隧道,用户通过以下网站轻松获取 json: https://fscarmen.cloudflare.now.cc\n\t • 极速安装方式,大大节省用户时间\n\t • 智能判断操作系统: Ubuntu 、Debian 、CentOS 、Alpine 和 Arch Linux,请务必选择 LTS 系统\n\t • 支持硬件结构类型: AMD 和 ARM\n"
-E[3]="Input errors up to 5 times.The script is aborted."
-C[3]="输入错误达5次,脚本退出"
-E[4]="WG Private Key should be 44 characters, please re-enter \(\${a} times remaining\)"
-C[4]="WG 私钥应为44位字符,请重新输入 \(剩余\${a}次\)"
-E[5]="The script supports Debian, Ubuntu, CentOS, Alpine or Arch systems only. Feedback: [https://github.com/fscarmen/argowg/issues]"
-C[5]="本脚本只支持 Debian、Ubuntu、CentOS、Alpine 或 Arch 系统,问题反馈:[https://github.com/fscarmen/argowg/issues]"
-E[6]="Curren operating system is \$SYS.\\\n The system lower than \$SYSTEM \${MAJOR[int]} is not supported. Feedback: [https://github.com/fscarmen/argowg/issues]"
-C[6]="当前操作是 \$SYS\\\n 不支持 \$SYSTEM \${MAJOR[int]} 以下系统,问题反馈:[https://github.com/fscarmen/argowg/issues]"
-E[7]="Install dependence-list:"
-C[7]="安装依赖列表:"
-E[8]="All dependencies already exist and do not need to be installed additionally."
-C[8]="所有依赖已存在，不需要额外安装"
-E[9]="To upgrade, press [y]. No upgrade by default:"
-C[9]="升级请按 [y]，默认不升级:"
-E[10]="(3/8) Please enter Argo Domain (Default is temporary domain if left blank):"
-C[10]="(3/8) 请输入 Argo 域名 (如果没有，可以跳过以使用 Argo 临时域名):"
-E[11]="Please enter Argo Token or Json ( User can easily obtain the json at https://fscarmen.cloudflare.now.cc ):"
-C[11]="请输入 Argo Token 或者 Json ( 用户通过以下网站轻松获取 json: https://fscarmen.cloudflare.now.cc ):"
-E[12]="\(6/8\) Please enter WireGuard Private Key \(Generate new one if left blank\):"
-C[12]="\(6/8\) 请输入 WireGuard 私钥 \(留空则生成新的\):"
-E[13]="\(7/8\) Please enter WireGuard Address \(Default is 10.0.0.2/32\):"
-C[13]="\(7/8\) 请输入 WireGuard 地址 \(默认为 10.0.0.2/32\):"
-E[14]="\(8/8\) Please enter WireGuard DNS \(Default is 1.1.1.1\):"
-C[14]="\(8/8\) 请输入 WireGuard DNS \(默认为 1.1.1.1\):"
-E[15]="ArgoWG script has not been installed yet."
-C[15]="ArgoWG 脚本还没有安装"
-E[16]="ArgoWG is completely uninstalled."
-C[16]="ArgoWG 已彻底卸载"
-E[17]="Version"
-C[17]="脚本版本"
-E[18]="New features"
-C[18]="功能新增"
-E[19]="System infomation"
-C[19]="系统信息"
-E[20]="Operating System"
-C[20]="当前操作系统"
-E[21]="Kernel"
-C[21]="内核"
-E[22]="Architecture"
-C[22]="处理器架构"
-E[23]="Virtualization"
-C[23]="虚拟化"
-E[24]="Choose:"
-C[24]="请选择:"
-E[25]="Curren architecture \$(uname -m) is not supported. Feedback: [https://github.com/fscarmen/argowg/issues]"
-C[25]="当前架构 \$(uname -m) 暂不支持,问题反馈:[https://github.com/fscarmen/argowg/issues]"
-E[26]="Not install"
-C[26]="未安装"
-E[27]="close"
-C[27]="关闭"
-E[28]="open"
-C[28]="开启"
-E[29]="View WireGuard config (argowg -n)"
-C[29]="查看 WireGuard 配置 (argowg -n)"
-E[30]="Change the Argo tunnel (argowg -t)"
-C[30]="更换 Argo 隧道 (argowg -t)"
-E[31]="Sync Argo and WireGuard to the latest version (argowg -v)"
-C[31]="同步 Argo 和 WireGuard 至最新版本 (argowg -v)"
-E[32]="Upgrade kernel, turn on BBR, change Linux system (argowg -b)"
-C[32]="升级内核、安装BBR、DD脚本 (argowg -b)"
-E[33]="Uninstall (argowg -u)"
-C[33]="卸载 (argowg -u)"
-E[34]="Install ArgoWG script (argo + wireguard)"
-C[34]="安装 ArgoWG 脚本 (argo + wireguard)"
-E[35]="Exit"
-C[35]="退出"
-E[36]="Please enter the correct number"
-C[36]="请输入正确数字"
-E[37]="successful"
-C[37]="成功"
-E[38]="failed"
-C[38]="失败"
-E[39]="ArgoWG is not installed."
-C[39]="ArgoWG 未安装"
-E[40]="Argo tunnel is: \$ARGO_TYPE\\\n The domain is: \$ARGO_DOMAIN"
-C[40]="Argo 隧道类型为: \$ARGO_TYPE\\\n 域名是: \$ARGO_DOMAIN"
-E[41]="Argo tunnel type:\n 1. Try\n 2. Token or Json"
-C[41]="Argo 隧道类型:\n 1. Try\n 2. Token 或者 Json"
-E[42]="(4/8) Please enter WireGuard Listen Port (Default is 51820):"
-C[42]="(4/8) 请输入 WireGuard 监听端口 (默认为 51820):"
-E[43]="\$APP local verion: \$LOCAL.\\\t The newest verion: \$ONLINE"
-C[43]="\$APP 本地版本: \$LOCAL.\\\t 最新版本: \$ONLINE"
-E[44]="No upgrade required."
-C[44]="不需要升级"
-E[45]="Argo authentication message does not match the rules, neither Token nor Json, script exits. Feedback:[https://github.com/fscarmen/argowg/issues]"
-C[45]="Argo 认证信息不符合规则，既不是 Token，也是不是 Json，脚本退出，问题反馈:[https://github.com/fscarmen/argowg/issues]"
-E[46]="Connect"
-C[46]="连接"
-E[47]="The script must be run as root, you can enter sudo -i and then download and run again. Feedback:[https://github.com/fscarmen/argowg/issues]"
-C[47]="必须以root方式运行脚本，可以输入 sudo -i 后重新下载运行，问题反馈:[https://github.com/fscarmen/argowg/issues]"
-E[48]="Downloading the latest version \$APP failed, script exits. Feedback:[https://github.com/fscarmen/argowg/issues]"
-C[48]="下载最新版本 \$APP 失败，脚本退出，问题反馈:[https://github.com/fscarmen/argowg/issues]"
-E[49]="(5/8) Please enter the node name. (Default is \${NODE_NAME_DEFAULT}):"
-C[49]="(5/8) 请输入节点名称 (默认为 \${NODE_NAME_DEFAULT}):"
-E[50]="WireGuard service is not enabled, config cannot be output. Press [y] if you want to open."
-C[50]="WireGuard 服务未开启，不能输出配置。如需打开请按 [y]: "
-E[51]="WireGuard Public Key:"
-C[51]="WireGuard 公钥:"
-E[52]="WireGuard Private Key:"
-C[52]="WireGuard 私钥:"
-E[53]="WireGuard Address:"
-C[53]="WireGuard 地址:"
-E[54]="WireGuard DNS:"
-C[54]="WireGuard DNS:"
-E[55]="WireGuard Listen Port:"
-C[55]="WireGuard 监听端口:"
-E[56]="Argo Domain:"
-C[56]="Argo 域名:"
-E[57]="Endpoint (for client):"
-C[57]="端点 (客户端使用):"
-E[58]="Generated WireGuard config:"
-C[58]="生成的 WireGuard 配置:"
-E[59]="Install WireGuard first"
-C[59]="请先安装 WireGuard"
-E[60]="WireGuard config QR code:"
-C[60]="WireGuard 配置二维码:"
-E[61]="Ports are in used: \$WG_PORT"
-C[61]="正在使用中的端口: \$WG_PORT"
-E[62]="Create shortcut [ argowg ] successfully."
-C[62]="创建快捷 [ argowg ] 指令成功!"
-E[63]="(2/8) Please enter VPS IP (Default is: \${SERVER_IP_DEFAULT}):"
-C[63]="(2/8) 请输入 VPS IP (默认为: \${SERVER_IP_DEFAULT}):"
-E[64]="WireGuard is detected to be running. Please enter the correct server IP:"
-C[64]="检测到 WireGuard 正在运行，请输入确认的服务器 IP:"
-E[65]="No server ip, script exits. Feedback:[https://github.com/fscarmen/argowg/issues]"
-C[65]="没有 server ip，脚本退出，问题反馈:[https://github.com/fscarmen/argowg/issues]"
-E[66]="WireGuard peer config:"
-C[66]="WireGuard 对等配置:"
-E[67]="Allocated IPs:"
-C[67]="分配的 IP:"
-E[68]="Additional IPs (comma separated):"
-C[68]="额外分配的 IP (逗号分隔):"
-E[69]="(9/8) Please enter additional IPs for WireGuard (comma separated, leave empty if not needed):"
-C[69]="(9/8) 请输入 WireGuard 额外分配的 IP (逗号分隔，不需要请留空):"
-E[70]="Quick install mode (argowg -k)"
-C[70]="极速安装模式 (argowg -l)"
-E[71]="Generate new WireGuard key pair"
-C[71]="生成新的 WireGuard 密钥对"
-E[72]="Use existing WireGuard key pair"
-C[72]="使用现有的 WireGuard 密钥对"
-
-# 自定义字体彩色，read 函数
-warning() { echo -e "\033[31m\033[01m$*\033[0m"; }  # 红色
-error() { echo -e "\033[31m\033[01m$*\033[0m" && exit 1; } # 红色
-info() { echo -e "\033[32m\033[01m$*\033[0m"; }   # 绿色
-hint() { echo -e "\033[33m\033[01m$*\033[0m"; }   # 黄色
-reading() { read -rp "$(info "$1")" "$2"; }
-text() { grep -q '\$' <<< "${E[$*]}" && eval echo "\$(eval echo "\${${L}[$*]}")" || eval echo "\${${L}[$*]}"; }
-
-# 检测是否需要启用 Github CDN，如能直接连通，则不使用
-check_cdn() {
-  [ -n "$GH_PROXY" ] && wget --server-response --quiet --output-document=/dev/null --no-check-certificate --tries=2 --timeout=3 ${GH_PROXY}https://raw.githubusercontent.com/fscarmen/ArgoWG/main/README.md >/dev/null 2>&1 || unset GH_PROXY
+# ----------------------------
+# 显示标题
+# ----------------------------
+show_title() {
+    clear
+    echo ""
+    echo "╔══════════════════════════════════════════════╗"
+    echo "║    Cloudflare Tunnel + WireGuard 管理脚本   ║"
+    echo "║                 版本: 1.0                   ║"
+    echo "╚══════════════════════════════════════════════╝"
+    echo ""
 }
 
-# 判断处理器架构
-check_arch() {
-  case $(uname -m) in
-    aarch64|arm64 )
-      ARGO_ARCH=arm64; WG_ARCH=arm64
-      ;;
-    x86_64|amd64 )
-      ARGO_ARCH=amd64; WG_ARCH=amd64
-      ;;
-    armv7l )
-      ARGO_ARCH=arm; WG_ARCH=arm
-      ;;
-    * )
-      error " $(text 25) "
-  esac
-}
-
-# 查安装及运行状态，下标0: argo，下标1: wg；状态码: 26 未安装， 27 已安装未运行， 28 运行中
-check_install() {
-  STATUS[0]=$(text 26)
-  # 检查 argo 服务
-  [ -s ${ARGO_DAEMON_FILE} ] && STATUS[0]=$(text 27) && cmd_systemctl status argo &>/dev/null && STATUS[0]=$(text 28)
-  
-  STATUS[1]=$(text 26)
-  # 检查 wireguard 服务
-  if [ -s ${WG_DAEMON_FILE} ]; then
-    ! grep -q "$WORK_DIR" ${WG_DAEMON_FILE} && error " WireGuard is not installed by this script! "
-    STATUS[1]=$(text 27) && cmd_systemctl status wg-quick@wg0 &>/dev/null && STATUS[1]=$(text 28)
-  fi
-
-  # 下载所需文件
-  [[ ${STATUS[0]} = "$(text 26)" ]] && [ ! -s $WORK_DIR/cloudflared ] && { wget --no-check-certificate -qO $TEMP_DIR/cloudflared ${GH_PROXY}https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$ARGO_ARCH >/dev/null 2>&1 && chmod +x $TEMP_DIR/cloudflared >/dev/null 2>&1; }&
-  [[ ${STATUS[1]} = "$(text 26)" ]] && { wget --no-check-certificate --continue -qO $TEMP_DIR/wg ${GH_PROXY}https://github.com/fscarmen/argowg/raw/main/wireguard-go-linux-$WG_ARCH >/dev/null 2>&1 && chmod +x $TEMP_DIR/wg >/dev/null 2>&1; }&
-}
-
-# 为了适配 alpine，定义 cmd_systemctl 的函数
-cmd_systemctl() {
-  [ -x "$(type -p systemctl)" ] && SYSTEMCTL=1 || SYSTEMCTL=0
-  
-  local ENABLE_DISABLE=$1
-  local APP=$2
-  if [ "$ENABLE_DISABLE" = 'enable' ]; then
-    if [ "$SYSTEM" = 'Alpine' ]; then
-      rc-service $APP start
-      rc-update add $APP default
-    elif [ "$IS_CENTOS" = 'CentOS7' ]; then
-      systemctl daemon-reload
-      systemctl enable --now $APP
-    else
-      systemctl daemon-reload
-      systemctl enable --now $APP
+# ----------------------------
+# 修复软件源问题
+# ----------------------------
+fix_apt_sources() {
+    print_info "检查软件源配置..."
+    
+    cp /etc/apt/sources.list /etc/apt/sources.list.backup 2>/dev/null || true
+    
+    if grep -q "debian" /etc/os-release; then
+        print_info "检测到 Debian 系统，修复软件源..."
+        cat > /etc/apt/sources.list << EOF
+deb http://deb.debian.org/debian bullseye main contrib non-free
+deb http://deb.debian.org/debian bullseye-updates main contrib non-free
+deb http://security.debian.org/debian-security bullseye-security main contrib non-free
+EOF
+    elif grep -q "ubuntu" /etc/os-release; then
+        print_info "检测到 Ubuntu 系统，修复软件源..."
+        cat > /etc/apt/sources.list << EOF
+deb http://archive.ubuntu.com/ubuntu focal main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu focal-updates main restricted universe multiverse
+deb http://security.ubuntu.com/ubuntu focal-security main restricted universe multiverse
+EOF
     fi
-
-  elif [ "$ENABLE_DISABLE" = 'disable' ]; then
-    if [ "$SYSTEM" = 'Alpine' ]; then
-      rc-service $APP stop
-      rc-update del $APP default
-    elif [ "$IS_CENTOS" = 'CentOS7' ]; then
-      systemctl disable --now $APP
-    else
-      systemctl disable --now $APP
-    fi
-  elif [ "$ENABLE_DISABLE" = 'status' ]; then
-    if [ "$SYSTEM" = 'Alpine' ]; then
-      rc-service $APP status
-    else
-      systemctl is-active $APP
-    fi
-  fi
+    
+    apt-get update -y || {
+        print_warning "软件源更新失败，尝试继续安装..."
+    }
 }
 
-# 检查系统信息
-check_system_info() {
-  # 判断虚拟化
-  if [ -x "$(type -p systemd-detect-virt)" ]; then
-    VIRT=$(systemd-detect-virt)
-  elif [ -x "$(type -p hostnamectl)" ]; then
-    VIRT=$(hostnamectl | awk '/Virtualization/{print $NF}')
-  elif [ -x "$(type -p virt-what)" ]; then
-    VIRT=$(virt-what)
-  fi
-
-  [ -s /etc/os-release ] && SYS="$(awk -F '"' 'tolower($0) ~ /pretty_name/{print $2}' /etc/os-release)"
-  [[ -z "$SYS" && -x "$(type -p hostnamectl)" ]] && SYS="$(hostnamectl | awk -F ': ' 'tolower($0) ~ /operating system/{print $2}')"
-  [[ -z "$SYS" && -x "$(type -p lsb_release)" ]] && SYS="$(lsb_release -sd)"
-  [[ -z "$SYS" && -s /etc/lsb-release ]] && SYS="$(awk -F '"' 'tolower($0) ~ /distrib_description/{print $2}' /etc/lsb-release)"
-  [[ -z "$SYS" && -s /etc/redhat-release ]] && SYS="$(cat /etc/redhat-release)"
-  [[ -z "$SYS" && -s /etc/issue ]] && SYS="$(sed -E '/^$|^\\/d' /etc/issue | awk -F '\\' '{print $1}' | sed 's/[ ]*$//g')"
-
-  REGEX=("debian" "ubuntu" "centos|red hat|kernel|alma|rocky" "arch linux" "alpine" "fedora")
-  RELEASE=("Debian" "Ubuntu" "CentOS" "Arch" "Alpine" "Fedora")
-  EXCLUDE=("---")
-  MAJOR=("9" "16" "7" "" "" "37")
-  PACKAGE_UPDATE=("apt -y update" "apt -y update" "yum -y update" "pacman -Sy" "apk update -f" "dnf -y update")
-  PACKAGE_INSTALL=("apt -y install" "apt -y install" "yum -y install" "pacman -S --noconfirm" "apk add --no-cache" "dnf -y install")
-  PACKAGE_UNINSTALL=("apt -y autoremove" "apt -y autoremove" "yum -y autoremove" "pacman -Rcnsu --noconfirm" "apk del -f" "dnf -y autoremove")
-
-  for int in "${!REGEX[@]}"; do
-    [[ "${SYS,,}" =~ ${REGEX[int]} ]] && SYSTEM="${RELEASE[int]}" && break
-  done
-  [ -z "$SYSTEM" ] && error " $(text 5) "
-
-  if [ -z "$SYSTEM" ]; then
-    [ -x "$(type -p yum)" ] && int=2 && SYSTEM='CentOS' || error " $(text 5) "
-  fi
-
-  for ex in "${EXCLUDE[@]}"; do [[ ! "{$SYS,,}" =~ $ex ]]; done &&
-  [[ "$(echo "$SYS" | sed "s/[^0-9.]//g" | cut -d. -f1)" -lt "${MAJOR[int]}" ]] && error " $(text 6) "
-
-  ARGO_DAEMON_FILE='/etc/systemd/system/argo.service'
-  WG_DAEMON_FILE='/etc/systemd/system/wg-quick@wg0.service'
-  DAEMON_RUN_PATTERN="ExecStart="
-  if [ "$SYSTEM" = 'CentOS' ]; then
-    IS_CENTOS="CentOS$(echo "$SYS" | sed "s/[^0-9.]//g" | cut -d. -f1)"
-  elif [ "$SYSTEM" = 'Alpine' ]; then
-    ARGO_DAEMON_FILE='/etc/init.d/argo'
-    DAEMON_RUN_PATTERN="command_args="
-  fi
-}
-
-# 检测 IPv4 IPv6 信息
-check_system_ip() {
-  [ "$L" = 'C' ] && local IS_CHINESE='?lang=zh-CN'
-  local DEFAULT_LOCAL_INTERFACE4=$(ip -4 route show default | awk '/default/ {for (i=0; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')
-  local DEFAULT_LOCAL_INTERFACE6=$(ip -6 route show default | awk '/default/ {for (i=0; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')
-  if [ -n "${DEFAULT_LOCAL_INTERFACE4}${DEFAULT_LOCAL_INTERFACE6}" ]; then
-    local DEFAULT_LOCAL_IP4=$(ip -4 addr show $DEFAULT_LOCAL_INTERFACE4 | sed -n 's#.*inet \([^/]\+\)/[0-9]\+.*global.*#\1#gp')
-    local DEFAULT_LOCAL_IP6=$(ip -6 addr show $DEFAULT_LOCAL_INTERFACE6 | sed -n 's#.*inet6 \([^/]\+\)/[0-9]\+.*global.*#\1#gp')
-    [ -n "$DEFAULT_LOCAL_IP4" ] && local BIND_ADDRESS4="--bind-address=$DEFAULT_LOCAL_IP4"
-    [ -n "$DEFAULT_LOCAL_IP6" ] && local BIND_ADDRESS6="--bind-address=$DEFAULT_LOCAL_IP6"
-  fi
-
-  WAN4=$(wget $BIND_ADDRESS4 -qO- --no-check-certificate --tries=2 --timeout=2 http://api-ipv4.ip.sb)
-  [ -n "$WAN4" ] && local IP4_JSON=$(wget -qO- --no-check-certificate --tries=2 --timeout=10 https://ip.forvps.gq/${WAN4}${IS_CHINESE}) &&
-  COUNTRY4=$(sed -En 's/.*"country":[ ]*"([^"]+)".*/\1/p' <<< "$IP4_JSON") &&
-  ASNORG4=$(sed -En 's/.*"(isp|asn_org)":[ ]*"([^"]+)".*/\2/p' <<< "$IP4_JSON")
-
-  WAN6=$(wget $BIND_ADDRESS6 -qO- --no-check-certificate --tries=2 --timeout=2 http://api-ipv6.ip.sb)
-  [ -n "$WAN6" ] && local IP6_JSON=$(wget -qO- --no-check-certificate --tries=2 --timeout=10 https://ip.forvps.gq/${WAN6}${IS_CHINESE}) &&
-  COUNTRY6=$(sed -En 's/.*"country":[ ]*"([^"]+)".*/\1/p' <<< "$IP6_JSON") &&
-  ASNORG6=$(sed -En 's/.*"(isp|asn_org)":[ ]*"([^"]+)".*/\2/p' <<< "$IP6_JSON")
-}
-
-# 定义 Argo 变量
-argo_variable() {
-  if grep -qi 'cloudflare' <<< "$ASNORG4$ASNORG6"; then
-    if grep -qi 'cloudflare' <<< "$ASNORG6" && [ -n "$WAN4" ] && ! grep -qi 'cloudflare' <<< "$ASNORG4"; then
-      SERVER_IP_DEFAULT=$WAN4
-    elif grep -qi 'cloudflare' <<< "$ASNORG4" && [ -n "$WAN6" ] && ! grep -qi 'cloudflare' <<< "$ASNORG6"; then
-      SERVER_IP_DEFAULT=$WAN6
-    else
-      local a=6
-      until [ -n "$SERVER_IP" ]; do
-        ((a--)) || true
-        [ "$a" = 0 ] && error "\n $(text 3) \n"
-        reading "\n $(text 64) " SERVER_IP
-      done
+# ----------------------------
+# 收集用户信息
+# ----------------------------
+collect_user_info() {
+    echo ""
+    print_info "═══════════════════════════════════════════════"
+    print_info "           配置 Cloudflare Tunnel"
+    print_info "═══════════════════════════════════════════════"
+    echo ""
+    
+    if [ "$SILENT_MODE" = true ]; then
+        USER_DOMAIN="wg.example.com"
+        print_info "静默模式：使用默认域名 $USER_DOMAIN"
+        print_info "隧道名称: $TUNNEL_NAME"
+        return
     fi
-  elif [ -n "$WAN4" ]; then
-    SERVER_IP_DEFAULT=$WAN4
-  elif [ -n "$WAN6" ]; then
-    SERVER_IP_DEFAULT=$WAN6
-  fi
-
-  if [ ! -d $WORK_DIR ]; then
-    ! grep -q 'noninteractive_install' <<< "$NONINTERACTIVE_INSTALL" && [ -z "$SERVER_IP" ] && reading "\n $(text 63) " SERVER_IP
-    SERVER_IP=${SERVER_IP:-"$SERVER_IP_DEFAULT"}
-    [ -z "$SERVER_IP" ] && error " $(text 65) "
-  fi
-
-  [[ "$NONINTERACTIVE_INSTALL" != 'noninteractive_install' && -z "$ARGO_DOMAIN" ]] && reading "\n $(text 10) " ARGO_DOMAIN
-  ARGO_DOMAIN=$(sed 's/[ ]*//g; s/:[ ]*//' <<< "$ARGO_DOMAIN")
-
-  if ! grep -q 'noninteractive_install' <<< "$NONINTERACTIVE_INSTALL" && [[ -n "$ARGO_DOMAIN" && -z "$ARGO_AUTH" ]]; then
-    local a=5
-    until [[ "$ARGO_AUTH" =~ TunnelSecret || "$ARGO_AUTH" =~ [A-Z0-9a-z=]{120,250}$ ]]; do
-      if [ "$a" = 0 ]; then
-        error "\n $(text 3) \n"
-      else
-        [ "$a" != 5 ] && warning "\n $(text 45) \n"
-        reading "\n $(text 11) " ARGO_AUTH
-      fi
-      ((a--)) || true
+    
+    while [[ -z "$USER_DOMAIN" ]]; do
+        print_input "请输入您的域名 (例如: wg.yourdomain.com):"
+        read -r USER_DOMAIN
+        
+        if [[ -z "$USER_DOMAIN" ]]; then
+            print_error "域名不能为空！"
+        elif ! [[ "$USER_DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9\.-]+\.[a-zA-Z]{2,}$ ]]; then
+            print_error "域名格式不正确，请重新输入！"
+            USER_DOMAIN=""
+        fi
     done
-  fi
-
-  if [[ "$ARGO_AUTH" =~ TunnelSecret ]]; then
-    ARGO_JSON=${ARGO_AUTH//[ ]/}
-  elif [[ "$ARGO_AUTH" =~ [A-Z0-9a-z=]{120,250}$ ]]; then
-    ARGO_TOKEN=$(awk '{print $NF}' <<< "$ARGO_AUTH")
-  fi
+    
+    print_input "请输入隧道名称 [默认: wg-argo-tunnel]:"
+    read -r TUNNEL_NAME
+    TUNNEL_NAME=${TUNNEL_NAME:-"wg-argo-tunnel"}
+    
+    print_input "请输入 WireGuard 监听端口 [默认: 51820]:"
+    read -r input_port
+    WIREGUARD_PORT=${input_port:-51820}
+    
+    echo ""
+    print_success "配置已保存:"
+    echo "  域名: $USER_DOMAIN"
+    echo "  隧道名称: $TUNNEL_NAME"
+    echo "  WireGuard 端口: $WIREGUARD_PORT"
+    echo ""
 }
 
-# 定义 WireGuard 变量
-wg_variable() {
-  local a=6
-  until [ -n "$WG_PORT" ]; do
-    ((a--)) || true
-    [ "$a" = 0 ] && error "\n $(text 3) \n"
-    WG_PORT_DEFAULT=51820
-    ! grep -q 'noninteractive_install' <<< "$NONINTERACTIVE_INSTALL" && reading "\n $(text 42) " WG_PORT
-    WG_PORT=${WG_PORT:-"$WG_PORT_DEFAULT"}
-    ss -nltup | grep -q ":$WG_PORT" && warning "\n $(text 61) \n" && unset WG_PORT
-  done
-
-  ! grep -q 'noninteractive_install' <<< "$NONINTERACTIVE_INSTALL" && reading "\n 1. $(text 71)\n 2. $(text 72)\n $(text 24) " KEY_CHOICE
-  KEY_CHOICE=${KEY_CHOICE:-1}
-  
-  if [ "$KEY_CHOICE" = 1 ]; then
-    WG_PRIVATE_KEY=$(wg genkey)
-    WG_PUBLIC_KEY=$(echo "$WG_PRIVATE_KEY" | wg pubkey)
-  else
-    local a=5
-    until [[ "${WG_PRIVATE_KEY}" =~ ^[A-Za-z0-9+/]{42}[A|Q|g|w]=$ ]]; do
-      ((a--)) || true
-      [ "$a" = 0 ] && error "\n $(text 3) \n"
-      reading "\n $(text 12) " WG_PRIVATE_KEY
-      if [[ "${WG_PRIVATE_KEY}" =~ ^[A-Za-z0-9+/]{42}[A|Q|g|w]=$ ]]; then
-        WG_PUBLIC_KEY=$(echo "$WG_PRIVATE_KEY" | wg pubkey 2>/dev/null)
-        [ -z "$WG_PUBLIC_KEY" ] && unset WG_PRIVATE_KEY && warning "\n $(text 4) "
-      else
-        warning "\n $(text 4) "
-      fi
-    done
-  fi
-
-  ! grep -q 'noninteractive_install' <<< "$NONINTERACTIVE_INSTALL" && reading "\n $(text 13) " WG_ADDRESS
-  WG_ADDRESS=${WG_ADDRESS:-"10.0.0.2/32"}
-
-  ! grep -q 'noninteractive_install' <<< "$NONINTERACTIVE_INSTALL" && reading "\n $(text 14) " WG_DNS
-  WG_DNS=${WG_DNS:-"1.1.1.1"}
-
-  ! grep -q 'noninteractive_install' <<< "$NONINTERACTIVE_INSTALL" && reading "\n $(text 69) " WG_EXTRA_IPS
-  WG_EXTRA_IPS=${WG_EXTRA_IPS:-""}
-
-  # 输入节点名
-  if [ -z "$NODE_NAME" ]; then
-    if [ -x "$(type -p hostname)" ]; then
-      NODE_NAME_DEFAULT="$(hostname)"
-    elif [ -s /etc/hostname ]; then
-      NODE_NAME_DEFAULT="$(cat /etc/hostname)"
+# ----------------------------
+# 系统检查
+# ----------------------------
+check_system() {
+    print_info "检查系统环境..."
+    
+    if [[ $EUID -ne 0 ]]; then
+        print_error "请使用root权限运行此脚本"
+        exit 1
+    fi
+    
+    # 修复软件源
+    fix_apt_sources
+    
+    # 检查是否已安装 WireGuard
+    if command -v wg &> /dev/null && command -v wg-quick &> /dev/null; then
+        print_success "WireGuard 已安装"
     else
-      NODE_NAME_DEFAULT="ArgoWG"
+        print_info "安装 WireGuard..."
+        
+        # 添加 WireGuard 源（针对 Ubuntu/Debian）
+        if grep -q "ubuntu" /etc/os-release; then
+            apt-get install -y software-properties-common
+            add-apt-repository -y ppa:wireguard/wireguard
+        fi
+        
+        apt-get update -y
+        apt-get install -y wireguard wireguard-tools
+        
+        if ! command -v wg &> /dev/null; then
+            print_error "WireGuard 安装失败"
+            exit 1
+        fi
+        print_success "WireGuard 安装成功"
     fi
-    ! grep -q 'noninteractive_install' <<< "$NONINTERACTIVE_INSTALL" && reading "\n $(text 49) " NODE_NAME
-    NODE_NAME="${NODE_NAME:-"$NODE_NAME_DEFAULT"}"
-  fi
-}
-
-# 快速安装的所有预设值
-fast_install_variables() {
-  NONINTERACTIVE_INSTALL='noninteractive_install'
-  
-  WG_PORT=${WG_PORT:-51820}
-  local PORT_USED_COUNT=0
-  while ss -nltup | grep ":$WG_PORT" >/dev/null 2>&1; do
-    WG_PORT=$(shuf -i 1000-65535 -n 1)
-    ((PORT_USED_COUNT++))
-    [ $PORT_USED_COUNT -gt 5 ] && error "\n $(text 3) \n"
-  done
-
-  # 生成新的密钥对
-  WG_PRIVATE_KEY=$(wg genkey)
-  WG_PUBLIC_KEY=$(echo "$WG_PRIVATE_KEY" | wg pubkey)
-  WG_ADDRESS=${WG_ADDRESS:-"10.0.0.2/32"}
-  WG_DNS=${WG_DNS:-"1.1.1.1"}
-  WG_EXTRA_IPS=${WG_EXTRA_IPS:-""}
-
-  # 输入节点名
-  if [ -x "$(type -p hostname)" ]; then
-    NODE_NAME_DEFAULT="$(hostname)"
-  elif [ -s /etc/hostname ]; then
-    NODE_NAME_DEFAULT="$(cat /etc/hostname)"
-  else
-    NODE_NAME_DEFAULT="ArgoWG"
-  fi
-  NODE_NAME=${NODE_NAME:-"$NODE_NAME_DEFAULT"}
-}
-
-check_dependencies() {
-  # 如果是 Alpine，先升级 wget
-  if [ "$SYSTEM" = 'Alpine' ]; then
-    local CHECK_WGET=$(wget 2>&1 | head -n 1)
-    grep -qi 'busybox' <<< "$CHECK_WGET" && ${PACKAGE_INSTALL[int]} wget >/dev/null 2>&1
-
-    local DEPS_CHECK=("bash" "rc-update" "virt-what")
-    local DEPS_INSTALL=("bash" "openrc" "virt-what")
-    for g in "${!DEPS_CHECK[@]}"; do
-      [ ! -x "$(type -p ${DEPS_CHECK[g]})" ] && DEPS_ALPINE+=(${DEPS_INSTALL[g]})
+    
+    # 安装必要工具
+    print_info "安装必要工具..."
+    local tools=("curl" "wget" "qrencode")
+    for tool in "${tools[@]}"; do
+        if ! command -v "$tool" &> /dev/null; then
+            apt-get install -y "$tool" 2>/dev/null || {
+                print_warning "$tool 安装失败，尝试继续..."
+            }
+        fi
     done
-    if [ "${#DEPS_ALPINE[@]}" -ge 1 ]; then
-      info "\n $(text 7) $(sed "s/ /,&/g" <<< ${DEPS_ALPINE[@]}) \n"
-      ${PACKAGE_UPDATE[int]} >/dev/null 2>&1
-      ${PACKAGE_INSTALL[int]} ${DEPS_ALPINE[@]} >/dev/null 2>&1
-      [[ -z "$VIRT" && "${DEPS_ALPINE[@]}" =~ 'virt-what' ]] && VIRT=$(virt-what | tr '\n' ' ')
-    fi
-  fi
-
-  # 检测 Linux 系统的依赖
-  local DEPS_CHECK=("wget" "ss" "bash" "wg")
-  local DEPS_INSTALL=("wget" "iproute2" "bash" "wireguard-tools")
-
-  [ "$SYSTEM" != 'Alpine' ] && DEPS_CHECK+=("systemctl") && DEPS_INSTALL+=("systemctl")
-
-  for g in "${!DEPS_CHECK[@]}"; do
-    [ ! -x "$(type -p ${DEPS_CHECK[g]})" ] && DEPS+=(${DEPS_INSTALL[g]})
-  done
-  if [ "${#DEPS[@]}" -ge 1 ]; then
-    info "\n $(text 7) $(sed "s/ /,&/g" <<< ${DEPS[@]}) \n"
-    [ "$SYSTEM" != 'CentOS' ] && ${PACKAGE_UPDATE[int]} >/dev/null 2>&1
-    ${PACKAGE_INSTALL[int]} ${DEPS[@]} >/dev/null 2>&1
-  else
-    info "\n $(text 8) \n"
-  fi
+    
+    print_success "系统检查完成"
 }
 
-install_argowg() {
-  argo_variable
-  wg_variable
+# ----------------------------
+# 安装 Cloudflared
+# ----------------------------
+install_cloudflared() {
+    print_info "安装 cloudflared..."
+    
+    local arch
+    arch=$(uname -m)
+    
+    case "$arch" in
+        x86_64|amd64)
+            local cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+            ;;
+        aarch64|arm64)
+            local cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+            ;;
+        *)
+            print_error "不支持的架构: $arch"
+            exit 1
+            ;;
+    esac
+    
+    if curl -L -o /tmp/cloudflared "$cf_url"; then
+        mv /tmp/cloudflared "$BIN_DIR/cloudflared"
+        chmod +x "$BIN_DIR/cloudflared"
+        print_success "cloudflared 安装成功"
+    else
+        print_error "cloudflared 下载失败"
+        exit 1
+    fi
+}
 
-  wait
-  [ ! -d /etc/systemd/system ] && mkdir -p /etc/systemd/system
-  mkdir -p $WORK_DIR && echo "$L" > $WORK_DIR/language
-  
-  # 创建 wireguard 配置目录
-  mkdir -p /etc/wireguard
+# ----------------------------
+# Cloudflare 授权
+# ----------------------------
+direct_cloudflare_auth() {
+    echo ""
+    print_auth "═══════════════════════════════════════════════"
+    print_auth "         Cloudflare 授权                      "
+    print_auth "═══════════════════════════════════════════════"
+    echo ""
+    
+    # 清理旧的授权文件
+    rm -rf /root/.cloudflared 2>/dev/null
+    mkdir -p /root/.cloudflared
+    
+    echo "请按以下步骤操作："
+    echo "1. 脚本将显示一个 Cloudflare 授权链接"
+    echo "2. 复制链接到浏览器打开"
+    echo "3. 登录您的 Cloudflare 账户"
+    echo "4. 选择您要使用的域名并授权"
+    echo "5. 返回终端按回车继续"
+    echo ""
+    print_input "按回车开始授权..."
+    read -r
+    
+    echo ""
+    echo "=============================================="
+    echo "请复制以下链接到浏览器："
+    echo ""
+    
+    # 运行授权命令
+    "$BIN_DIR/cloudflared" tunnel login
+    
+    echo ""
+    echo "=============================================="
+    print_input "完成授权后按回车继续..."
+    read -r
+    
+    # 检查授权结果
+    if [[ -f "/root/.cloudflared/cert.pem" ]]; then
+        print_success "✅ 授权成功！找到证书文件"
+        return 0
+    else
+        print_error "❌ 授权失败：未找到证书文件"
+        return 1
+    fi
+}
 
-  wait
-  [[ ! -s $WORK_DIR/cloudflared && -x $TEMP_DIR/cloudflared ]] && mv $TEMP_DIR/cloudflared $WORK_DIR
-  [[ ! -s $WORK_DIR/wg && -x $TEMP_DIR/wg ]] && mv $TEMP_DIR/wg $WORK_DIR
+# ----------------------------
+# 生成 WireGuard 密钥
+# ----------------------------
+generate_wireguard_keys() {
+    print_info "生成 WireGuard 密钥..."
+    
+    mkdir -p "$WG_KEY_DIR"
+    chmod 700 "$WG_KEY_DIR"
+    
+    # 生成服务器密钥对
+    if [[ ! -f "$WG_KEY_DIR/server_private.key" ]]; then
+        wg genkey | tee "$WG_KEY_DIR/server_private.key" | wg pubkey > "$WG_KEY_DIR/server_public.key"
+        chmod 600 "$WG_KEY_DIR/server_private.key"
+    fi
+    
+    # 生成客户端密钥对
+    if [[ ! -f "$WG_KEY_DIR/client_private.key" ]]; then
+        wg genkey | tee "$WG_KEY_DIR/client_private.key" | wg pubkey > "$WG_KEY_DIR/client_public.key"
+        chmod 600 "$WG_KEY_DIR/client_private.key"
+    fi
+    
+    # 生成预共享密钥
+    if [[ ! -f "$WG_KEY_DIR/preshared.key" ]]; then
+        wg genpsk > "$WG_KEY_DIR/preshared.key"
+        chmod 600 "$WG_KEY_DIR/preshared.key"
+    fi
+    
+    print_success "WireGuard 密钥生成完成"
+}
 
-  if [[ -n "${ARGO_JSON}" && -n "${ARGO_DOMAIN}" ]]; then
-    ARGO_RUNS="$WORK_DIR/cloudflared tunnel --edge-ip-version auto --config $WORK_DIR/tunnel.yml run"
-    json_argo
-  elif [[ -n "${ARGO_TOKEN}" && -n "${ARGO_DOMAIN}" ]]; then
-    ARGO_RUNS="$WORK_DIR/cloudflared tunnel --edge-ip-version auto run --token ${ARGO_TOKEN}"
-  else
-    ARGO_RUNS="$WORK_DIR/cloudflared tunnel --edge-ip-version auto --no-autoupdate --metrics 0.0.0.0:${METRICS_PORT} --url udp://localhost:${WG_PORT}"
-  fi
-
-  # 生成 WireGuard 配置文件
-  cat > /etc/wireguard/wg0.conf << EOF
+# ----------------------------
+# 配置 WireGuard
+# ----------------------------
+configure_wireguard() {
+    print_info "配置 WireGuard..."
+    
+    # 读取密钥
+    local server_private=$(cat "$WG_KEY_DIR/server_private.key")
+    local server_public=$(cat "$WG_KEY_DIR/server_public.key")
+    local client_private=$(cat "$WG_KEY_DIR/client_private.key")
+    local client_public=$(cat "$WG_KEY_DIR/client_public.key")
+    local preshared_key=$(cat "$WG_KEY_DIR/preshared.key")
+    
+    # 生成服务器配置
+    cat > "$WG_CONFIG" << EOF
 [Interface]
-PrivateKey = ${WG_PRIVATE_KEY}
-Address = ${WG_ADDRESS}
-ListenPort = ${WG_PORT}
-DNS = ${WG_DNS}
+PrivateKey = $server_private
+Address = 10.9.0.1/24
+ListenPort = $WIREGUARD_PORT
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE; ip6tables -A FORWARD -i wg0 -j ACCEPT; ip6tables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE; ip6tables -D FORWARD -i wg0 -j ACCEPT; ip6tables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+
+# Client configuration
+[Peer]
+PublicKey = $client_public
+PresharedKey = $preshared_key
+AllowedIPs = 10.9.0.2/32
+EOF
+    
+    # 生成客户端配置
+    cat > "$CONFIG_DIR/client.conf" << EOF
+[Interface]
+PrivateKey = $client_private
+Address = 10.9.0.2/24
+DNS = 1.1.1.1, 8.8.8.8
 MTU = 1280
-PostUp = sysctl -w net.ipv4.ip_forward=1; sysctl -w net.ipv6.conf.all.forwarding=1
-PostDown = sysctl -w net.ipv4.ip_forward=0; sysctl -w net.ipv6.conf.all.forwarding=0
 
 [Peer]
-PublicKey = ${WG_PUBLIC_KEY}
+PublicKey = $server_public
+PresharedKey = $preshared_key
+Endpoint = $USER_DOMAIN:51820
 AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
 EOF
-
-  # 添加额外 IP
-  if [ -n "$WG_EXTRA_IPS" ]; then
-    IFS=',' read -ra EXTRA_IPS <<< "$WG_EXTRA_IPS"
-    for ip in "${EXTRA_IPS[@]}"; do
-      echo "Address = $ip" >> /etc/wireguard/wg0.conf
-    done
-  fi
-
-  # Argo 生成守护进程文件
-  if [ "$SYSTEM" = 'Alpine' ]; then
-    cat > ${ARGO_DAEMON_FILE} << EOF
-#!/sbin/openrc-run
-
-name="argo"
-description="Cloudflare Tunnel"
-command="$WORK_DIR/cloudflared"
-command_args="${ARGO_RUNS#*cloudflared }"
-pidfile="/var/run/\${RC_SVCNAME}.pid"
-command_background="yes"
-output_log="$WORK_DIR/argo.log"
-error_log="$WORK_DIR/argo.log"
-
-depend() {
-    need net
-    after net
+    
+    # 启用 IP 转发
+    echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+    echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
+    sysctl -p
+    
+    print_success "WireGuard 配置完成"
 }
+
+# ----------------------------
+# 创建隧道和配置
+# ----------------------------
+setup_tunnel() {
+    print_info "设置 Cloudflare Tunnel..."
+    
+    if [[ ! -f "/root/.cloudflared/cert.pem" ]]; then
+        print_error "❌ 未找到证书文件，请先完成授权"
+        exit 1
+    fi
+    
+    # 删除可能存在的同名隧道
+    "$BIN_DIR/cloudflared" tunnel delete -f "$TUNNEL_NAME" 2>/dev/null || true
+    sleep 2
+    
+    # 创建新隧道
+    print_info "创建隧道: $TUNNEL_NAME"
+    if timeout 60 "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME"; then
+        sleep 3
+        print_success "✅ 隧道创建成功"
+    else
+        print_error "❌ 无法创建隧道"
+        exit 1
+    fi
+    
+    # 获取隧道ID和凭证文件
+    local json_file=$(ls -t /root/.cloudflared/*.json 2>/dev/null | head -1)
+    local tunnel_id=$("$BIN_DIR/cloudflared" tunnel list 2>/dev/null | grep "$TUNNEL_NAME" | awk '{print $1}')
+    
+    if [[ -z "$tunnel_id" ]]; then
+        print_error "❌ 无法获取隧道ID"
+        exit 1
+    fi
+    
+    # 绑定域名
+    print_info "绑定域名: $USER_DOMAIN"
+    "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN" > /dev/null 2>&1
+    print_success "✅ 域名绑定成功"
+    
+    # 创建配置目录
+    mkdir -p "$CONFIG_DIR"
+    
+    # 保存隧道配置
+    cat > "$CONFIG_DIR/tunnel.conf" << EOF
+TUNNEL_ID=$tunnel_id
+TUNNEL_NAME=$TUNNEL_NAME
+DOMAIN=$USER_DOMAIN
+WG_PORT=$WIREGUARD_PORT
+CERT_PATH=/root/.cloudflared/cert.pem
+CREDENTIALS_FILE=$json_file
+CREATED_DATE=$(date +"%Y-%m-%d")
 EOF
-    chmod +x ${ARGO_DAEMON_FILE}
-  else
-    local ARGO_SERVER="[Unit]
-Description=Cloudflare Tunnel
+    
+    print_success "隧道设置完成"
+}
+
+# ----------------------------
+# 创建 Cloudflared 配置
+# ----------------------------
+configure_cloudflared() {
+    print_info "配置 cloudflared..."
+    
+    local tunnel_id=$(grep "^TUNNEL_ID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local json_file=$(grep "^CREDENTIALS_FILE=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local wg_port=$(grep "^WG_PORT=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    
+    # 创建 cloudflared 配置文件
+    cat > "$CONFIG_DIR/config.yaml" << EOF
+tunnel: $tunnel_id
+credentials-file: $json_file
+logfile: $LOG_DIR/argo.log
+loglevel: info
+ingress:
+  - hostname: $domain
+    service: udp://localhost:$wg_port
+    originRequest:
+      noTLSVerify: true
+      connectTimeout: 30s
+      tcpKeepAlive: 30s
+      noHappyEyeballs: true
+  - service: http_status:404
+EOF
+    
+    print_success "cloudflared 配置完成"
+}
+
+# ----------------------------
+# 配置系统服务
+# ----------------------------
+configure_services() {
+    print_info "配置系统服务..."
+    
+    # 创建日志目录
+    mkdir -p "$LOG_DIR"
+    
+    # 创建 WireGuard 服务文件
+    cat > /etc/systemd/system/wg-argo-wireguard.service << EOF
+[Unit]
+Description=WireGuard VPN Server
 After=network.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=wg-quick up wg0
+ExecStop=wg-quick down wg0
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    # 创建 Cloudflared 服务文件
+    cat > /etc/systemd/system/wg-argo-cloudflared.service << EOF
+[Unit]
+Description=WireGuard Argo Tunnel Service
+After=network.target wg-argo-wireguard.service
+Wants=network-online.target
 
 [Service]
 Type=simple
-NoNewPrivileges=yes
-TimeoutStartSec=0
-ExecStart=$ARGO_RUNS
-Restart=on-failure
-RestartSec=5s
+User=root
+Group=root
+Environment="TUNNEL_ORIGIN_CERT=/root/.cloudflared/cert.pem"
+ExecStart=$BIN_DIR/cloudflared tunnel --config $CONFIG_DIR/config.yaml run
+Restart=always
+RestartSec=10
+StandardOutput=append:$LOG_DIR/argo.log
+StandardError=append:$LOG_DIR/argo-error.log
 
 [Install]
-WantedBy=multi-user.target"
-
-    echo "$ARGO_SERVER" > ${ARGO_DAEMON_FILE}
-  fi
-
-  # 再次检测状态，运行 Argo 和 WireGuard
-  check_install
-  case "${STATUS[0]}" in
-    "$(text 26)" )
-      warning "\n Argo $(text 28) $(text 38) \n"
-      ;;
-    "$(text 27)" )
-      cmd_systemctl enable argo
-      cmd_systemctl status argo &>/dev/null && info "\n Argo $(text 28) $(text 37) \n" || warning "\n Argo $(text 28) $(text 38) \n"
-      ;;
-    "$(text 28)" )
-      info "\n Argo $(text 28) $(text 37) \n"
-  esac
-
-  # 启动 WireGuard
-  if [ -f /etc/wireguard/wg0.conf ]; then
-    if [ "$SYSTEM" = 'Alpine' ]; then
-      wg-quick up wg0
-      rc-update add wg-quick@wg0 default
-    else
-      systemctl enable --now wg-quick@wg0
-      systemctl status wg-quick@wg0 &>/dev/null && info "\n WireGuard $(text 28) $(text 37) \n" || warning "\n WireGuard $(text 28) $(text 38) \n"
-    fi
-  fi
-}
-
-# 创建快捷方式
-create_shortcut() {
-  cat > $WORK_DIR/awg.sh << EOF
-#!/usr/bin/env bash
-
-bash <(wget --no-check-certificate -qO- ${GH_PROXY}https://raw.githubusercontent.com/fscarmen/argowg/main/argowg.sh) \$1
+WantedBy=multi-user.target
 EOF
-  chmod +x $WORK_DIR/awg.sh
-  ln -sf $WORK_DIR/awg.sh /usr/bin/argowg
-
-  if [[ ! ":$PATH:" == *":/usr/bin:"* ]]; then
-    echo 'export PATH=$PATH:/usr/bin' >> ~/.bashrc
-    source ~/.bashrc
-  fi
-
-  [ -s /usr/bin/argowg ] && hint "\n $(text 62) "
+    
+    # 重载systemd
+    systemctl daemon-reload
+    
+    # 启用 WireGuard 服务
+    systemctl enable wg-argo-wireguard.service
+    systemctl enable wg-argo-cloudflared.service
+    
+    print_success "系统服务配置完成"
 }
 
-export_list() {
-  check_install
-
-  # 没有开启 Argo 和 WireGuard 服务
-  local APP
-  [ "${STATUS[0]}" != "$(text 28)" ] && APP+=(Argo)
-  [ "${STATUS[1]}" != "$(text 28)" ] && APP+=(WireGuard)
-  if [ "${#APP[@]}" -gt 0 ]; then
-    reading "\n $(text 50) " OPEN_APP
-    if [ "${OPEN_APP,,}" = 'y' ]; then
-      [ "${STATUS[0]}" != "$(text 28)" ] && cmd_systemctl enable argo
-      [ "${STATUS[1]}" != "$(text 28)" ] && systemctl enable --now wg-quick@wg0
+# ----------------------------
+# 启动服务
+# ----------------------------
+start_services() {
+    print_info "启动服务..."
+    
+    # 停止可能存在的旧服务
+    systemctl stop wg-argo-cloudflared.service 2>/dev/null || true
+    systemctl stop wg-argo-wireguard.service 2>/dev/null || true
+    sleep 2
+    
+    # 启动 WireGuard 服务
+    print_info "启动 WireGuard..."
+    systemctl start wg-argo-wireguard.service
+    
+    if systemctl is-active --quiet wg-argo-wireguard.service; then
+        print_success "✅ WireGuard 启动成功"
     else
-      exit
+        print_error "❌ WireGuard 启动失败"
+        return 1
     fi
-  fi
-
-  if grep -qs "^${DAEMON_RUN_PATTERN}.*udp://localhost" ${ARGO_DAEMON_FILE}; then
-    local a=5
-    until [[ -n "$ARGO_DOMAIN" || "$a" = 0 ]]; do
-      sleep 2
-      ARGO_DOMAIN=$(wget -qO- http://localhost:${METRICS_PORT}/quicktunnel | awk -F '"' '{print $4}')
-      ((a--)) || true
+    
+    # 启动 Cloudflared 服务
+    print_info "启动 Cloudflared..."
+    systemctl start wg-argo-cloudflared.service
+    
+    # 等待隧道连接
+    local wait_time=0
+    local max_wait=30
+    
+    print_info "等待隧道连接建立（最多30秒）..."
+    
+    while [[ $wait_time -lt $max_wait ]]; do
+        if systemctl is-active --quiet wg-argo-cloudflared.service; then
+            print_success "✅ Cloudflared 服务运行中"
+            break
+        fi
+        sleep 3
+        ((wait_time+=3))
     done
-  else
-    ARGO_DOMAIN=${ARGO_DOMAIN:-"$ARGO_DOMAIN"}
-  fi
-
-  [[ "$SERVER_IP" =~ : ]] && SERVER_IP_1="[$SERVER_IP]" || SERVER_IP_1="$SERVER_IP"
-  
-  grep -q 'metrics.*url' ${ARGO_DAEMON_FILE} && QUICK_TUNNEL_URL="Quicktunnel domain can be obtained from: http://${SERVER_IP_1}:${METRICS_PORT}/quicktunnel"
-
-  # 生成 WireGuard 客户端配置
-  local WG_CLIENT_CONFIG="[Interface]
-PrivateKey = <CLIENT_PRIVATE_KEY>
-Address = 10.0.0.2/32
-DNS = ${WG_DNS}
-MTU = 1280
-
-[Peer]
-PublicKey = ${WG_PUBLIC_KEY}
-Endpoint = ${ARGO_DOMAIN}:${WG_PORT}
-AllowedIPs = 0.0.0.0/0, ::/0
-PersistentKeepalive = 25"
-
-  # 生成完整的配置信息
-  EXPORT_LIST_FILE="*******************************************
-┌────────────────┐
-│                │
-│   $(warning "WireGuard")   │
-│                │
-└────────────────┘
-----------------------------
-
-$(info "$(text 51): ${WG_PUBLIC_KEY}
-$(text 52): ${WG_PRIVATE_KEY}
-$(text 53): ${WG_ADDRESS}
-$(text 54): ${WG_DNS}
-$(text 55): ${WG_PORT}
-$(text 56): ${ARGO_DOMAIN}
-$(text 57): ${ARGO_DOMAIN}:${WG_PORT}")
-
-$(text 66):
-$(hint "$WG_CLIENT_CONFIG")
-
-$(text 67):
-${WG_ADDRESS}
-$(echo "$WG_EXTRA_IPS" | tr ',' '\n')
-
-$(info "\n${QUICK_TUNNEL_URL}")
-"
-
-  # 生成并显示配置信息
-  echo "$EXPORT_LIST_FILE" > $WORK_DIR/list
-  cat $WORK_DIR/list
+    
+    if [[ $wait_time -ge $max_wait ]]; then
+        print_warning "⚠️  隧道服务启动较慢"
+    fi
+    
+    return 0
 }
 
-# 更换 Argo 隧道类型
-change_argo() {
-  check_install
-  [[ ${STATUS[0]} = "$(text 26)" ]] && error " $(text 39) "
+# ----------------------------
+# 显示连接信息
+# ----------------------------
+show_connection_info() {
+    print_info "═══════════════════════════════════════════════"
+    print_info "           安装完成！连接信息"
+    print_info "═══════════════════════════════════════════════"
+    echo ""
+    
+    if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
+        print_error "未找到配置文件"
+        return
+    fi
+    
+    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    
+    if [[ ! -f "$CONFIG_DIR/client.conf" ]]; then
+        print_error "未找到客户端配置文件"
+        return
+    fi
+    
+    print_success "🔗 WireGuard 服务器: $domain:51820"
+    print_success "📁 客户端配置: $CONFIG_DIR/client.conf"
+    print_success "🌐 内网网段: 10.9.0.0/24"
+    print_success "🖥️  服务器IP: 10.9.0.1"
+    print_success "📱 客户端IP: 10.9.0.2"
+    
+    echo ""
+    
+    # 显示客户端配置内容
+    print_info "📋 客户端配置内容:"
+    echo "═══════════════════════════════════════════════"
+    cat "$CONFIG_DIR/client.conf"
+    echo "═══════════════════════════════════════════════"
+    echo ""
+    
+    # 生成 QR 码（如果安装了 qrencode）
+    if command -v qrencode &> /dev/null; then
+        print_info "📱 客户端配置二维码:"
+        qrencode -t utf8 < "$CONFIG_DIR/client.conf"
+        echo ""
+    fi
+    
+    print_info "🧪 服务状态:"
+    echo ""
+    
+    if systemctl is-active --quiet wg-argo-wireguard.service; then
+        print_success "✅ WireGuard 服务: 运行中"
+        echo ""
+        print_info "WireGuard 接口状态:"
+        wg show
+    else
+        print_error "❌ WireGuard 服务: 未运行"
+    fi
+    
+    echo ""
+    
+    if systemctl is-active --quiet wg-argo-cloudflared.service; then
+        print_success "✅ Cloudflared 服务: 运行中"
+    else
+        print_error "❌ Cloudflared 服务: 未运行"
+    fi
+    
+    echo ""
+    print_info "📋 使用说明:"
+    echo "  1. 将 client.conf 导入 WireGuard 客户端"
+    echo "  2. 或扫描上面的二维码（如果支持）"
+    echo "  3. 如果连接不上，等待2-3分钟再试"
+    echo "  4. 查看服务状态: sudo ./wg_argo.sh status"
+    echo ""
+    
+    print_info "🔧 管理命令:"
+    echo "  状态检查: sudo ./wg_argo.sh status"
+    echo "  重启 WireGuard: systemctl restart wg-argo-wireguard.service"
+    echo "  重启 Cloudflared: systemctl restart wg-argo-cloudflared.service"
+    echo "  查看日志: journalctl -u wg-argo-cloudflared.service -f"
+}
 
-  case $(grep "${DAEMON_RUN_PATTERN}" ${ARGO_DAEMON_FILE}) in
-    *--config* )
-      ARGO_TYPE='Json'; ARGO_DOMAIN="$(grep -o 'hostname: [^ ]*' $WORK_DIR/tunnel.yml | cut -d' ' -f2)" ;;
-    *--token* )
-      ARGO_TYPE='Token' ;;
-    * )
-      ARGO_TYPE='Try'
-      ARGO_DOMAIN=$(wget -qO- http://localhost:${METRICS_PORT}/quicktunnel | awk -F '"' '{print $4}')
-  esac
+# ----------------------------
+# 主安装流程
+# ----------------------------
+main_install() {
+    print_info "开始安装流程..."
+    
+    check_system
+    install_cloudflared
+    collect_user_info
+    
+    # Cloudflare 授权
+    if ! direct_cloudflare_auth; then
+        print_warning "授权可能有问题"
+        print_input "是否继续安装？(y/N): "
+        read -r continue_install
+        if [[ "$continue_install" != "y" && "$continue_install" != "Y" ]]; then
+            print_error "安装中止"
+            return 1
+        fi
+    fi
+    
+    # 设置隧道
+    if ! setup_tunnel; then
+        print_error "隧道设置失败"
+        return 1
+    fi
+    
+    generate_wireguard_keys
+    configure_wireguard
+    configure_cloudflared
+    configure_services
+    
+    if ! start_services; then
+        print_error "服务启动失败"
+        return 1
+    fi
+    
+    show_connection_info
+    
+    echo ""
+    print_success "🎉 安装完成！"
+    return 0
+}
 
-  hint "\n $(text 40) \n"
-  unset ARGO_DOMAIN
-  hint " $(text 41) \n" && reading " $(text 24) " CHANGE_TO
-    case "$CHANGE_TO" in
-      1 )
-        cmd_systemctl disable argo
-        [ -s $WORK_DIR/tunnel.json ] && rm -f $WORK_DIR/tunnel.{json,yml}
-        if [ "$SYSTEM" = 'Alpine' ]; then
-          local ARGS="--edge-ip-version auto --no-autoupdate --metrics 0.0.0.0:${METRICS_PORT} --url udp://localhost:${WG_PORT}"
-          sed -i "s@^command_args=.*@command_args=\"$ARGS\"@g" ${ARGO_DAEMON_FILE}
-        else
-          sed -i "s@ExecStart=.*@ExecStart=$WORK_DIR/cloudflared tunnel --edge-ip-version auto --no-autoupdate --metrics 0.0.0.0:${METRICS_PORT} --url udp://localhost:${WG_PORT}@g" ${ARGO_DAEMON_FILE}
-        fi
-        ;;
-      2 )
-        argo_variable
-        cmd_systemctl disable argo
-        if [ -n "$ARGO_TOKEN" ]; then
-          [ -s $WORK_DIR/tunnel.json ] && rm -f $WORK_DIR/tunnel.{json,yml}
-          if [ "$SYSTEM" = 'Alpine' ]; then
-            local ARGS="--edge-ip-version auto run --token ${ARGO_TOKEN}"
-            sed -i "s@^command_args=.*@command_args=\"$ARGS\"@g" ${ARGO_DAEMON_FILE}
-          else
-            sed -i "s@ExecStart=.*@ExecStart=$WORK_DIR/cloudflared tunnel --edge-ip-version auto run --token ${ARGO_TOKEN}@g" ${ARGO_DAEMON_FILE}
-          fi
-        elif [ -n "$ARGO_JSON" ]; then
-          [ -s $WORK_DIR/tunnel.json ] && rm -f $WORK_DIR/tunnel.{json,yml}
-          json_argo
-          if [ "$SYSTEM" = 'Alpine' ]; then
-            local ARGS="--edge-ip-version auto --config $WORK_DIR/tunnel.yml run"
-            sed -i "s@^command_args=.*@command_args=\"$ARGS\"@g" ${ARGO_DAEMON_FILE}
-          else
-            sed -i "s@ExecStart=.*@ExecStart=$WORK_DIR/cloudflared tunnel --edge-ip-version auto --config $WORK_DIR/tunnel.yml run@g" ${ARGO_DAEMON_FILE}
-          fi
-        fi
-        ;;
-      * )
-        exit 0
+# ----------------------------
+# 卸载功能
+# ----------------------------
+uninstall_all() {
+    print_info "开始卸载 WireGuard Argo Tunnel..."
+    echo ""
+    
+    print_warning "⚠️  警告：此操作将删除所有配置和数据！"
+    print_input "确认要卸载吗？(y/N): "
+    read -r confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        print_info "卸载已取消"
+        return
+    fi
+    
+    echo ""
+    print_info "停止服务..."
+    
+    systemctl stop wg-argo-cloudflared.service 2>/dev/null || true
+    systemctl stop wg-argo-wireguard.service 2>/dev/null || true
+    
+    systemctl disable wg-argo-cloudflared.service 2>/dev/null || true
+    systemctl disable wg-argo-wireguard.service 2>/dev/null || true
+    
+    rm -f /etc/systemd/system/wg-argo-cloudflared.service
+    rm -f /etc/systemd/system/wg-argo-wireguard.service
+    
+    # 停止并删除 WireGuard 接口
+    wg-quick down wg0 2>/dev/null || true
+    rm -f /etc/wireguard/wg0.conf
+    
+    rm -rf "$CONFIG_DIR" "$LOG_DIR" "$WG_KEY_DIR"
+    
+    print_input "是否删除 cloudflared 二进制文件？(y/N): "
+    read -r delete_bin
+    if [[ "$delete_bin" == "y" || "$delete_bin" == "Y" ]]; then
+        rm -f "$BIN_DIR/cloudflared"
+    fi
+    
+    print_input "是否删除 Cloudflare 授权文件？(y/N): "
+    read -r delete_auth
+    if [[ "$delete_auth" == "y" || "$delete_auth" == "Y" ]]; then
+        rm -rf /root/.cloudflared
+    fi
+    
+    systemctl daemon-reload
+    
+    echo ""
+    print_success "✅ 卸载完成！"
+}
+
+# ----------------------------
+# 显示配置信息
+# ----------------------------
+show_config() {
+    if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
+        print_error "未找到配置文件，可能未安装"
+        return 1
+    fi
+    
+    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
+    
+    echo ""
+    print_success "当前配置:"
+    echo "  域名: $domain"
+    echo "  隧道名称: $TUNNEL_NAME"
+    echo "  WireGuard 端口: $WIREGUARD_PORT"
+    echo ""
+    
+    if [[ -f "$CONFIG_DIR/client.conf" ]]; then
+        print_info "📋 客户端配置:"
+        echo "═══════════════════════════════════════════════"
+        cat "$CONFIG_DIR/client.conf"
+        echo "═══════════════════════════════════════════════"
+    fi
+    echo ""
+}
+
+# ----------------------------
+# 显示服务状态
+# ----------------------------
+show_status() {
+    print_info "服务状态检查..."
+    echo ""
+    
+    if systemctl is-active --quiet wg-argo-wireguard.service; then
+        print_success "WireGuard 服务: 运行中"
+        echo ""
+        print_info "WireGuard 接口状态:"
+        wg show
+    else
+        print_error "WireGuard 服务: 未运行"
+    fi
+    
+    echo ""
+    
+    if systemctl is-active --quiet wg-argo-cloudflared.service; then
+        print_success "Cloudflared 服务: 运行中"
+        
+        echo ""
+        print_info "隧道信息:"
+        "$BIN_DIR/cloudflared" tunnel list 2>/dev/null || true
+    else
+        print_error "Cloudflared 服务: 未运行"
+    fi
+}
+
+# ----------------------------
+# 显示菜单
+# ----------------------------
+show_menu() {
+    show_title
+    
+    echo "请选择操作："
+    echo ""
+    echo "  1) 安装 WireGuard + Argo Tunnel"
+    echo "  2) 卸载 WireGuard + Argo Tunnel"
+    echo "  3) 查看服务状态"
+    echo "  4) 查看配置信息"
+    echo "  5) 退出"
+    echo ""
+    
+    print_input "请输入选项 (1-5): "
+    read -r choice
+    
+    case "$choice" in
+        1)
+            SILENT_MODE=false
+            if main_install; then
+                echo ""
+                print_input "按回车键返回菜单..."
+                read -r
+            else
+                echo ""
+                print_error "安装失败"
+                print_input "按回车键返回菜单..."
+                read -r
+            fi
+            ;;
+        2)
+            uninstall_all
+            echo ""
+            print_input "按回车键返回菜单..."
+            read -r
+            ;;
+        3)
+            show_status
+            echo ""
+            print_input "按回车键返回菜单..."
+            read -r
+            ;;
+        4)
+            show_config
+            echo ""
+            print_input "按回车键返回菜单..."
+            read -r
+            ;;
+        5)
+            print_info "再见！"
+            exit 0
+            ;;
+        *)
+            print_error "无效选项"
+            sleep 1
+            ;;
     esac
-
-    cmd_systemctl enable argo
-    export_list
-}
-
-# 卸载 ArgoWG
-uninstall() {
-  if [ -d $WORK_DIR ]; then
-    cmd_systemctl disable argo
-    systemctl disable --now wg-quick@wg0 2>/dev/null || true
     
-    # 根据系统类型删除不同的服务文件
-    [ "$SYSTEM" = 'Alpine' ] && rm -rf $WORK_DIR $TEMP_DIR /etc/init.d/argo /usr/bin/argowg /etc/wireguard/wg0.conf || rm -rf $WORK_DIR $TEMP_DIR /etc/systemd/system/argo.service /usr/bin/argowg /etc/wireguard/wg0.conf
-
-    info "\n $(text 16) \n"
-  else
-    error "\n $(text 15) \n"
-  fi
+    show_menu
 }
 
-# Argo 的最新版本
-version() {
-  local ONLINE=$(wget --no-check-certificate -qO- "${GH_PROXY}https://api.github.com/repos/cloudflare/cloudflared/releases/latest" | grep "tag_name" | cut -d \" -f4)
-  [ -z "$ONLINE" ] && error " $(text 74) "
-  local LOCAL=$($WORK_DIR/cloudflared -v | awk '{for (i=0; i<NF; i++) if ($i=="version") {print $(i+1)}}')
-  local APP=ARGO && info "\n $(text 43) "
-  [[ -n "$ONLINE" && "$ONLINE" != "$LOCAL" ]] && reading "\n $(text 9) " UPDATE || info " $(text 44) "
-
-  if [ "${UPDATE,,}" = 'y' ]; then
-    wget --no-check-certificate -O $TEMP_DIR/cloudflared ${GH_PROXY}https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$ARGO_ARCH
-    if [ -s $TEMP_DIR/cloudflared ]; then
-      cmd_systemctl disable argo
-      chmod +x $TEMP_DIR/cloudflared && mv $TEMP_DIR/cloudflared $WORK_DIR/cloudflared
-      cmd_systemctl enable argo
-      cmd_systemctl status argo &>/dev/null && info " Argo $(text 28) $(text 37)" || error " Argo $(text 28) $(text 38) "
-    else
-      local APP=ARGO && error "\n $(text 48) "
-    fi
-  fi
+# ----------------------------
+# 主函数
+# ----------------------------
+main() {
+    case "${1:-}" in
+        "install")
+            SILENT_MODE=false
+            show_title
+            main_install
+            ;;
+        "uninstall")
+            show_title
+            uninstall_all
+            ;;
+        "config")
+            show_title
+            show_config
+            ;;
+        "status")
+            show_title
+            show_status
+            ;;
+        "-y"|"--silent")
+            SILENT_MODE=true
+            show_title
+            main_install
+            ;;
+        "menu"|"")
+            show_menu
+            ;;
+        *)
+            show_title
+            echo "使用方法:"
+            echo "  sudo ./wg_argo.sh menu          # 显示菜单"
+            echo "  sudo ./wg_argo.sh install       # 安装"
+            echo "  sudo ./wg_argo.sh uninstall     # 卸载"
+            echo "  sudo ./wg_argo.sh status        # 查看状态"
+            echo "  sudo ./wg_argo.sh config        # 查看配置"
+            echo "  sudo ./wg_argo.sh -y            # 静默安装"
+            exit 1
+            ;;
+    esac
 }
 
-# 判断当前 Argo-WG 的运行状态，并对应的给菜单和动作赋值
-menu_setting() {
-  if [[ "${STATUS[*]}" =~ $(text 27)|$(text 28) ]]; then
-    if [ -s $WORK_DIR/cloudflared ]; then
-      ARGO_VERSION=$($WORK_DIR/cloudflared -v | awk '{print $3}' | sed "s@^@Version: &@g")
-      grep -q '^Alpine$' <<< "$SYSTEM" && local PID_COLUMN='1' || local PID_COLUMN='2'
-      local PID=$(ps -ef | awk -v work_dir="${WORK_DIR}" -v col="$PID_COLUMN" '$0 ~ work_dir".*cloudflared" && !/grep/ {print $col; exit}')
-      local REALTIME_METRICS_PORT=$(ss -nltp | awk -v pid=$PID '$0 ~ "pid="pid"," {split($4, a, ":"); print a[length(a)]}')
-      ss -nltp | grep -q "cloudflared.*pid=${PID}," && ARGO_CHECKHEALTH="$(text 46): $(wget -qO- http://localhost:${REALTIME_METRICS_PORT}/healthcheck | sed "s/OK/$(text 37)/")"
-    fi
+# 检查是否以root运行
+if [[ $EUID -ne 0 ]] && [[ "${1:-}" != "" ]]; then
+    print_error "请使用root权限运行此脚本"
+    exit 1
+fi
 
-    OPTION[1]="1.  $(text 29)"
-    if [ ${STATUS[0]} = "$(text 28)" ]; then
-      AEGO_MEMORY="$(text 52): $(awk '/VmRSS/{printf "%.1f\n", $2/1024}' /proc/$(awk '/\/etc\/argowg\/cloudflared/{print $1}' <<< "$PS_LIST")/status) MB"
-      OPTION[2]="2.  $(text 27) Argo (argowg -a)"
-    else
-      OPTION[2]="2.  $(text 28) Argo (argowg -a)"
-    fi
-    
-    [ -f /etc/wireguard/wg0.conf ] && {
-      WG_STATUS=$(systemctl is-active wg-quick@wg0 2>/dev/null || echo "inactive")
-      if [ "$WG_STATUS" = "active" ]; then
-        WG_MEMORY="$(text 52): $(awk '/VmRSS/{printf "%.1f\n", $2/1024}' /proc/$(awk '/wg-quick/{print $1}' <<< "$PS_LIST")/status) MB"
-        OPTION[3]="3.  $(text 27) WireGuard (argowg -w)"
-      else
-        OPTION[3]="3.  $(text 28) WireGuard (argowg -w)"
-      fi
-    } || OPTION[3]="3.  $(text 59)"
-
-    OPTION[4]="4.  $(text 30)"
-    OPTION[5]="5.  $(text 31)"
-    OPTION[6]="6.  $(text 32)"
-    OPTION[7]="7.  $(text 33)"
-
-    ACTION[1]() { export_list; exit 0; }
-    [[ ${STATUS[0]} = "$(text 28)" ]] &&
-    ACTION[2]() {
-      cmd_systemctl disable argo
-      cmd_systemctl status argo &>/dev/null && error " Argo $(text 27) $(text 38) " || info "\n Argo $(text 27) $(text 37)"
-    } ||
-    ACTION[2]() {
-      cmd_systemctl enable argo
-      sleep 2
-      cmd_systemctl status argo &>/dev/null && info "\n Argo $(text 28) $(text 37)" || error " Argo $(text 28) $(text 38) "
-    }
-
-    [[ "$WG_STATUS" = "active" ]] &&
-    ACTION[3]() {
-      systemctl disable --now wg-quick@wg0
-      systemctl status wg-quick@wg0 &>/dev/null && error " WireGuard $(text 27) $(text 38) " || info "\n WireGuard $(text 27) $(text 37)"
-    } ||
-    ACTION[3]() {
-      systemctl enable --now wg-quick@wg0
-      sleep 2
-      systemctl status wg-quick@wg0 &>/dev/null && info "\n WireGuard $(text 28) $(text 37)" || error " WireGuard $(text 28) $(text 38) "
-    }
-    
-    ACTION[4]() { change_argo; exit; }
-    ACTION[5]() { version; exit; }
-    ACTION[6]() { bash <(wget --no-check-certificate -qO- ${GH_PROXY}https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master/tcp.sh); exit; }
-    ACTION[7]() { uninstall; exit; }
-
-  else
-    OPTION[1]="1.  $(text 70)"
-    OPTION[2]="2.  $(text 34)"
-    OPTION[3]="3.  $(text 32)"
-
-    ACTION[1]() { fast_install_variables; install_argowg; export_list; create_shortcut; exit;}
-    ACTION[2]() { install_argowg; export_list; create_shortcut; exit; }
-    ACTION[3]() { bash <(wget --no-check-certificate -qO- ${GH_PROXY}https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master/tcp.sh); exit; }
-  fi
-
-  [ "${#OPTION[@]}" -ge '8' ] && OPTION[0]="0 .  $(text 35)" || OPTION[0]="0.  $(text 35)"
-  ACTION[0]() { exit; }
-}
-
-menu() {
-  clear
-  echo -e "======================================================================================================================\n"
-  info " $(text 17):$VERSION\n $(text 18):$(text 1)\n $(text 19):\n\t $(text 20):$SYS\n\t $(text 21):$(uname -r)\n\t $(text 22):$ARGO_ARCH\n\t $(text 23):$VIRT "
-  info "\t IPv4: $WAN4 $COUNTRY4  $ASNORG4 "
-  info "\t IPv6: $WAN6 $COUNTRY6  $ASNORG6 "
-  info "\t Argo: ${STATUS[0]}\t $ARGO_VERSION\t $AEGO_MEMORY\t $ARGO_CHECKHEALTH"
-  [ -f /etc/wireguard/wg0.conf ] && info "\t WireGuard: ${WG_STATUS:-Not installed}\t $WG_MEMORY"
-  echo -e "\n======================================================================================================================\n"
-  for ((b=1;b<${#OPTION[*]};b++)); do hint " ${OPTION[b]} "; done
-  hint " ${OPTION[0]} "
-  reading "\n $(text 24) " CHOOSE
-
-  if grep -qE "^[0-9]$" <<< "$CHOOSE" && [ "$CHOOSE" -lt "${#OPTION[*]}" ]; then
-    ACTION[$CHOOSE]
-  else
-    warning " $(text 36) [0-$((${#OPTION[*]}-1))] " && sleep 1 && menu
-  fi
-}
-
-check_cdn
-check_root
-check_arch
-check_system_info
-check_dependencies
-check_system_ip
-check_install
-menu_setting
-[ "$NONINTERACTIVE_INSTALL" = 'noninteractive_install' ] && ACTION[2] || menu
+main "$@"
