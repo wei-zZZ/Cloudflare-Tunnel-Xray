@@ -1,13 +1,14 @@
 #!/bin/bash
 # ============================================
-# Cloudflare Tunnel + Shadowsocks 安装脚本
-# 版本: 1.0 - 适配 v2rayN 客户端
+# Argo Tunnel + Shadowsocks 一键安装脚本
+# 版本: 2.0 - 完全重写版
+# 特点: 稳定、简洁、自动故障修复
 # ============================================
 
 set -e
 
 # ----------------------------
-# 颜色输出
+# 颜色和样式定义
 # ----------------------------
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -17,632 +18,564 @@ CYAN='\033[0;36m'
 PURPLE='\033[0;35m'
 NC='\033[0m'
 
-print_info() { echo -e "${BLUE}[*]${NC} $1"; }
-print_success() { echo -e "${GREEN}[+]${NC} $1"; }
-print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
-print_error() { echo -e "${RED}[-]${NC} $1"; }
-print_input() { echo -e "${CYAN}[?]${NC} $1"; }
-print_auth() { echo -e "${GREEN}[🔐]${NC} $1"; }
-print_ss() { echo -e "${PURPLE}[🛡️]${NC} $1"; }
+log_info() { echo -e "${BLUE}[ℹ]${NC} $1"; }
+log_success() { echo -e "${GREEN}[✓]${NC} $1"; }
+log_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
+log_error() { echo -e "${RED}[✗]${NC} $1"; }
+log_input() { echo -e "${CYAN}[?]${NC} $1"; }
 
 # ----------------------------
-# 配置变量
+# 全局配置
 # ----------------------------
-CONFIG_DIR="/etc/ss-argo"
-LOG_DIR="/var/log/ss-argo"
+CONFIG_DIR="/etc/argo-ss"
+LOG_DIR="/var/log/argo-ss"
 BIN_DIR="/usr/local/bin"
-SERVICE_USER="ss-argo"
-SERVICE_GROUP="ss-argo"
-
-USER_DOMAIN=""
-TUNNEL_NAME="ss-argo-tunnel"
-SHADOWSOCKS_PORT=10000
-SHADOWSOCKS_PASSWORD=""
-SHADOWSOCKS_METHOD="chacha20-ietf-poly1305"
-SILENT_MODE=false
-
-# Cloudflare 优选域名列表
-OPTIMAL_DOMAINS=(
-    "cf.090227.xyz"
-    "cdn.100867.xyz"
-    "cf.100867.xyz"
-    "cdn.cloudflare.180895.xyz"
-    "cf.cloudflare.180895.xyz"
-    "cdn.180895.xyz"
-    "cf.180895.xyz"
-    "cdn.023084.xyz"
-    "cf.023084.xyz"
-    "cdn.speed.cloudflare.com"
-    "cf.speed.cloudflare.com"
-    "argo.example.com"
-)
+SERVICE_USER="argo-ss"
+SS_PORT=10000
+SS_PASSWORD=""
+SS_METHOD="chacha20-ietf-poly1305"
+TUNNEL_NAME="argo-ss-tunnel"
+DOMAIN=""
 
 # ----------------------------
 # 显示标题
 # ----------------------------
-show_title() {
+show_banner() {
     clear
-    echo ""
-    echo "╔══════════════════════════════════════════════════════╗"
-    echo "║    Cloudflare Tunnel + Shadowsocks 管理脚本         ║"
-    echo "║              版本: 1.0 - v2rayN适配版               ║"
-    echo "╚══════════════════════════════════════════════════════╝"
-    echo ""
+    cat << "EOF"
+
+    ╔══════════════════════════════════════════════╗
+    ║        Argo Tunnel + Shadowsocks            ║
+    ║            一键安装脚本 v2.0                ║
+    ╚══════════════════════════════════════════════╝
+
+EOF
 }
 
 # ----------------------------
-# 收集用户信息
+# 系统检查与准备
 # ----------------------------
-collect_user_info() {
-    echo ""
-    print_info "═══════════════════════════════════════════════"
-    print_info "           配置 Cloudflare Tunnel"
-    print_info "═══════════════════════════════════════════════"
-    echo ""
+system_check() {
+    log_info "系统环境检查..."
     
-    if [ "$SILENT_MODE" = true ]; then
-        USER_DOMAIN="ss.example.com"
-        SHADOWSOCKS_PASSWORD=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
-        print_info "静默模式：使用默认域名 $USER_DOMAIN"
-        print_info "隧道名称: $TUNNEL_NAME"
-        print_info "密码已自动生成"
-        return
+    # 检查root权限
+    if [[ $EUID -ne 0 ]]; then
+        log_error "请使用root权限运行此脚本"
+        exit 1
     fi
     
-    echo "请选择域名类型："
-    echo "  1) 使用自有域名"
-    echo "  2) 使用优选域名（自动选择最快的 Cloudflare 节点）"
-    echo ""
-    print_input "请输入选项 (1-2): "
-    read -r domain_type
+    # 检测系统
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        log_info "操作系统: $NAME $VERSION"
+    else
+        log_warning "无法检测操作系统"
+    fi
     
-    if [ "$domain_type" = "2" ]; then
-        # 使用优选域名
-        print_info "正在测试优选域名，请稍候..."
-        select_optimal_domain
+    # 更新软件源
+    log_info "更新软件包列表..."
+    apt-get update -y > /dev/null 2>&1 || {
+        log_warning "软件源更新失败，尝试继续..."
+    }
+    
+    # 安装基础工具
+    log_info "安装必要工具..."
+    local tools=("curl" "wget" "unzip" "jq" "net-tools" "iproute2" "openssl" "qrencode")
+    for tool in "${tools[@]}"; do
+        if ! command -v "$tool" &> /dev/null; then
+            apt-get install -y "$tool" > /dev/null 2>&1 || {
+                log_warning "$tool 安装失败"
+            }
+        fi
+    done
+    
+    log_success "系统检查完成"
+}
+
+# ----------------------------
+# 安装 Cloudflared（稳定版）
+# ----------------------------
+install_cloudflared() {
+    log_info "安装 Cloudflared..."
+    
+    # 检查是否已安装
+    if command -v cloudflared &> /dev/null; then
+        log_success "Cloudflared 已安装"
+        return 0
+    fi
+    
+    local arch=$(uname -m)
+    local version="2025.11.1"
+    local cf_url=""
+    
+    # 根据架构选择下载链接
+    case "$arch" in
+        x86_64|amd64)
+            cf_url="https://github.com/cloudflare/cloudflared/releases/download/${version}/cloudflared-linux-amd64"
+            ;;
+        aarch64|arm64)
+            cf_url="https://github.com/cloudflare/cloudflared/releases/download/${version}/cloudflared-linux-arm64"
+            ;;
+        *)
+            log_error "不支持的架构: $arch"
+            return 1
+            ;;
+    esac
+    
+    # 下载 cloudflared
+    log_info "下载 Cloudflared..."
+    if wget -q --timeout=30 --tries=3 -O /tmp/cloudflared "$cf_url"; then
+        mv /tmp/cloudflared "$BIN_DIR/cloudflared"
+        chmod +x "$BIN_DIR/cloudflared"
         
-        if [ -n "$USER_DOMAIN" ]; then
-            print_success "已选择优选域名: $USER_DOMAIN"
-        else
-            print_warning "优选域名测试失败，请输入自定义域名"
-            domain_type="1"
+        # 验证安装
+        if "$BIN_DIR/cloudflared" --version &> /dev/null; then
+            log_success "Cloudflared 安装成功"
+            return 0
         fi
     fi
     
-    if [ "$domain_type" = "1" ]; then
-        while [[ -z "$USER_DOMAIN" ]]; do
-            print_input "请输入您的域名 (例如: ss.yourdomain.com):"
-            read -r USER_DOMAIN
+    # 如果下载失败，尝试备用方法
+    log_warning "主下载源失败，尝试备用源..."
+    
+    # 备用下载源
+    local alt_urls=(
+        "https://ghproxy.com/${cf_url}"
+        "https://download.fastgit.org/cloudflare/cloudflared/releases/download/${version}/cloudflared-linux-${arch}"
+    )
+    
+    for alt_url in "${alt_urls[@]}"; do
+        log_info "尝试备用源: $(echo "$alt_url" | cut -d'/' -f3)"
+        if wget -q --timeout=30 -O /tmp/cloudflared "$alt_url"; then
+            mv /tmp/cloudflared "$BIN_DIR/cloudflared"
+            chmod +x "$BIN_DIR/cloudflared"
             
-            if [[ -z "$USER_DOMAIN" ]]; then
-                print_error "域名不能为空！"
-            elif ! [[ "$USER_DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9\.-]+\.[a-zA-Z]{2,}$ ]]; then
-                print_error "域名格式不正确，请重新输入！"
-                USER_DOMAIN=""
+            if "$BIN_DIR/cloudflared" --version &> /dev/null; then
+                log_success "Cloudflared 安装成功（备用源）"
+                return 0
             fi
-        done
+        fi
+    done
+    
+    log_error "Cloudflared 安装失败"
+    return 1
+}
+
+# ----------------------------
+# 安装 Shadowsocks-rust（稳定版）
+# ----------------------------
+install_shadowsocks() {
+    log_info "安装 Shadowsocks..."
+    
+    # 检查是否已安装
+    if command -v ssserver &> /dev/null; then
+        log_success "Shadowsocks 已安装"
+        return 0
     fi
     
-    print_input "请输入隧道名称 [默认: ss-argo-tunnel]:"
-    read -r TUNNEL_NAME
-    TUNNEL_NAME=${TUNNEL_NAME:-"ss-argo-tunnel"}
+    local arch=$(uname -m)
     
-    print_input "请输入 Shadowsocks 端口 [默认: 10000]:"
-    read -r input_port
-    SHADOWSOCKS_PORT=${input_port:-10000}
+    # 首先尝试使用系统包管理器
+    log_info "尝试使用系统包安装..."
+    if apt-get install -y shadowsocks-libev > /dev/null 2>&1; then
+        ln -sf /usr/bin/ss-server "$BIN_DIR/ssserver"
+        log_success "Shadowsocks-libev 安装成功"
+        return 0
+    fi
     
-    # 选择加密方法
+    # 如果系统包安装失败，尝试下载预编译版本
+    log_info "下载预编译 Shadowsocks-rust..."
+    
+    # GitHub Releases 最新版本
+    local latest_release=$(curl -s "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest" | 
+                         grep '"tag_name":' | cut -d'"' -f4)
+    
+    if [ -z "$latest_release" ]; then
+        latest_release="v1.20.1"  # 使用稳定版本
+    fi
+    
+    local ss_url=""
+    case "$arch" in
+        x86_64|amd64)
+            ss_url="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${latest_release}/shadowsocks-${latest_release}.x86_64-unknown-linux-gnu.tar.xz"
+            ;;
+        aarch64|arm64)
+            ss_url="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${latest_release}/shadowsocks-${latest_release}.aarch64-unknown-linux-gnu.tar.xz"
+            ;;
+        *)
+            log_error "不支持的架构: $arch"
+            return 1
+            ;;
+    esac
+    
+    # 下载并解压
+    if wget -q --timeout=30 --tries=3 -O /tmp/ss.tar.xz "$ss_url"; then
+        mkdir -p /tmp/ss
+        tar -xf /tmp/ss.tar.xz -C /tmp/ss --strip-components=1
+        
+        # 复制二进制文件
+        find /tmp/ss -name "ssserver" -type f -exec cp {} "$BIN_DIR/ssserver" \;
+        find /tmp/ss -name "sslocal" -type f -exec cp {} "$BIN_DIR/sslocal" \;
+        
+        chmod +x "$BIN_DIR/ssserver" "$BIN_DIR/sslocal"
+        
+        # 清理
+        rm -rf /tmp/ss /tmp/ss.tar.xz
+        
+        if command -v ssserver &> /dev/null; then
+            log_success "Shadowsocks-rust 安装成功"
+            return 0
+        fi
+    fi
+    
+    # 最后的方案：编译安装
+    log_warning "预编译版本下载失败，尝试编译安装..."
+    compile_shadowsocks
+}
+
+# ----------------------------
+# 编译安装 Shadowsocks-rust
+# ----------------------------
+compile_shadowsocks() {
+    log_info "开始编译 Shadowsocks-rust..."
+    
+    # 安装 Rust 工具链
+    if ! command -v cargo &> /dev/null; then
+        log_info "安装 Rust 工具链..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        source "$HOME/.cargo/env"
+    fi
+    
+    # 克隆源代码
+    local temp_dir="/tmp/ss-build"
+    rm -rf "$temp_dir"
+    git clone https://github.com/shadowsocks/shadowsocks-rust.git "$temp_dir"
+    cd "$temp_dir"
+    
+    # 编译
+    cargo build --release
+    
+    # 安装
+    cp target/release/ssserver target/release/sslocal "$BIN_DIR/"
+    chmod +x "$BIN_DIR/ssserver" "$BIN_DIR/sslocal"
+    
+    log_success "Shadowsocks-rust 编译安装成功"
+    return 0
+}
+
+# ----------------------------
+# 获取用户配置
+# ----------------------------
+get_user_config() {
     echo ""
-    print_info "选择 Shadowsocks 加密方法:"
+    log_info "═══════════════════════════════════════════════"
+    log_info "             配置信息输入"
+    log_info "═══════════════════════════════════════════════"
+    echo ""
+    
+    # 获取域名
+    while true; do
+        log_input "请输入要使用的域名（例如：example.com）："
+        read -r DOMAIN
+        
+        if [[ -z "$DOMAIN" ]]; then
+            log_error "域名不能为空"
+            continue
+        fi
+        
+        # 简单的域名格式验证
+        if [[ "$DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+            break
+        else
+            log_error "域名格式不正确，请重新输入"
+        fi
+    done
+    
+    # Shadowsocks 配置
+    log_input "请输入 Shadowsocks 端口 [默认: 10000]:"
+    read -r port_input
+    SS_PORT=${port_input:-10000}
+    
+    echo ""
+    log_info "选择加密方法："
     echo "  1) chacha20-ietf-poly1305 (推荐)"
     echo "  2) aes-256-gcm"
     echo "  3) aes-128-gcm"
     echo "  4) xchacha20-ietf-poly1305"
     echo ""
-    print_input "请输入选项 (1-4) [默认: 1]:"
-    read -r method_choice
     
-    case $method_choice in
-        1) SHADOWSOCKS_METHOD="chacha20-ietf-poly1305" ;;
-        2) SHADOWSOCKS_METHOD="aes-256-gcm" ;;
-        3) SHADOWSOCKS_METHOD="aes-128-gcm" ;;
-        4) SHADOWSOCKS_METHOD="xchacha20-ietf-poly1305" ;;
-        *) SHADOWSOCKS_METHOD="chacha20-ietf-poly1305" ;;
-    esac
-    
-    # 设置密码
-    echo ""
-    print_input "请输入 Shadowsocks 密码 (留空则自动生成):"
-    read -r input_password
-    
-    if [[ -z "$input_password" ]]; then
-        SHADOWSOCKS_PASSWORD=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
-        print_success "已自动生成密码: $SHADOWSOCKS_PASSWORD"
-    else
-        SHADOWSOCKS_PASSWORD="$input_password"
-    fi
-    
-    echo ""
-    print_success "配置已保存:"
-    echo "  域名: $USER_DOMAIN"
-    echo "  隧道名称: $TUNNEL_NAME"
-    echo "  Shadowsocks 端口: $SHADOWSOCKS_PORT"
-    echo "  加密方法: $SHADOWSOCKS_METHOD"
-    echo "  密码: $SHADOWSOCKS_PASSWORD"
-    echo ""
-}
-
-# ----------------------------
-# 选择优选域名
-# ----------------------------
-select_optimal_domain() {
-    print_info "开始测试优选域名延迟..."
-    
-    local best_domain=""
-    local best_latency=99999
-    
-    for domain in "${OPTIMAL_DOMAINS[@]}"; do
-        print_info "测试域名: $domain"
+    while true; do
+        log_input "请选择 [1-4, 默认: 1]:"
+        read -r method_choice
         
-        # 使用 ping 测试延迟（取平均值）
-        local latency=$(ping -c 2 -W 2 "$domain" 2>/dev/null | tail -1 | awk -F '/' '{print $5}' | cut -d '.' -f 1)
-        
-        if [[ -n "$latency" ]] && [[ "$latency" -lt "$best_latency" ]]; then
-            best_latency="$latency"
-            best_domain="$domain"
-            print_success "  当前最优: ${latency}ms - $domain"
-        elif [[ -n "$latency" ]]; then
-            print_info "  延迟: ${latency}ms"
-        else
-            print_warning "  无法连接"
-        fi
+        case "$method_choice" in
+            1|"") 
+                SS_METHOD="chacha20-ietf-poly1305"
+                break
+                ;;
+            2) 
+                SS_METHOD="aes-256-gcm"
+                break
+                ;;
+            3) 
+                SS_METHOD="aes-128-gcm"
+                break
+                ;;
+            4) 
+                SS_METHOD="xchacha20-ietf-poly1305"
+                break
+                ;;
+            *) 
+                log_error "无效选择，请重试"
+                ;;
+        esac
     done
     
-    if [[ -n "$best_domain" ]]; then
-        USER_DOMAIN="$best_domain"
-        
-        # 保存优选域名信息
-        mkdir -p "$CONFIG_DIR"
-        echo "OPTIMAL_DOMAIN=$best_domain" > "$CONFIG_DIR/optimal_domain.info"
-        echo "LATENCY=${best_latency}ms" >> "$CONFIG_DIR/optimal_domain.info"
-        echo "TEST_DATE=$(date)" >> "$CONFIG_DIR/optimal_domain.info"
-        
-        print_success "✅ 选择最优域名: $best_domain (延迟: ${best_latency}ms)"
-        return 0
-    else
-        print_error "❌ 所有优选域名测试失败"
-        return 1
-    fi
-}
-
-# ----------------------------
-# 系统检查
-# ----------------------------
-check_system() {
-    print_info "检查系统环境..."
+    # 生成密码
+    SS_PASSWORD=$(openssl rand -base64 16 | tr -d '/+=' | cut -c1-16)
     
-    if [[ $EUID -ne 0 ]]; then
-        print_error "请使用root权限运行此脚本"
-        exit 1
-    fi
-    
-    # 更新系统
-    print_info "更新系统包列表..."
-    apt-get update -y
-    
-    # 安装必要工具
-    print_info "安装必要工具..."
-    local tools=("curl" "wget" "unzip" "jq" "net-tools" "iproute2")
-    for tool in "${tools[@]}"; do
-        if ! command -v "$tool" &> /dev/null; then
-            apt-get install -y "$tool" 2>/dev/null || {
-                print_warning "$tool 安装失败，跳过..."
-            }
-        fi
-    done
-    
-    print_success "系统检查完成"
-}
-
-# ----------------------------
-# 安装 Cloudflared
-# ----------------------------
-install_cloudflared() {
-    print_info "安装 cloudflared..."
-    
-    local arch
-    arch=$(uname -m)
-    
-    case "$arch" in
-        x86_64|amd64)
-            local cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
-            ;;
-        aarch64|arm64)
-            local cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
-            ;;
-        *)
-            print_error "不支持的架构: $arch"
-            exit 1
-            ;;
-    esac
-    
-    # 清理旧版本
-    rm -f /tmp/cloudflared 2>/dev/null
-    rm -f "$BIN_DIR/cloudflared" 2>/dev/null
-    
-    # 下载 cloudflared
-    print_info "下载 cloudflared..."
-    
-    if curl -L -o /tmp/cloudflared "$cf_url" --connect-timeout 30 --retry 3; then
-        mv /tmp/cloudflared "$BIN_DIR/cloudflared"
-        chmod +x "$BIN_DIR/cloudflared"
-        
-        # 验证安装
-        if "$BIN_DIR/cloudflared" --version > /dev/null 2>&1; then
-            print_success "cloudflared 安装成功"
-            print_info "版本信息:"
-            "$BIN_DIR/cloudflared" --version
-            return 0
-        else
-            print_error "cloudflared 验证失败"
-            return 1
-        fi
-    else
-        print_error "cloudflared 下载失败"
-        print_info "尝试备用下载源..."
-        
-        # 备用下载源
-        local alt_url="https://ghproxy.com/$cf_url"
-        if curl -L -o /tmp/cloudflared "$alt_url" --connect-timeout 30; then
-            mv /tmp/cloudflared "$BIN_DIR/cloudflared"
-            chmod +x "$BIN_DIR/cloudflared"
-            
-            if "$BIN_DIR/cloudflared" --version > /dev/null 2>&1; then
-                print_success "cloudflared 安装成功（使用备用源）"
-                return 0
-            fi
-        fi
-        
-        print_error "所有下载源均失败"
-        return 1
-    fi
-}
-
-# ----------------------------
-# 安装 Shadowsocks-rust
-# ----------------------------
-install_shadowsocks() {
-    print_info "安装 Shadowsocks-rust..."
-    
-    local arch
-    arch=$(uname -m)
-    
-    # 根据架构选择下载链接
-    case "$arch" in
-        x86_64|amd64)
-            local ss_url="https://github.com/shadowsocks/shadowsocks-rust/releases/latest/download/shadowsocks-x86_64-unknown-linux-gnu.tar.xz"
-            ;;
-        aarch64|arm64)
-            local ss_url="https://github.com/shadowsocks/shadowsocks-rust/releases/latest/download/shadowsocks-aarch64-unknown-linux-gnu.tar.xz"
-            ;;
-        *)
-            print_error "不支持的架构: $arch"
-            exit 1
-            ;;
-    esac
-    
-    # 下载并解压
-    print_info "下载 Shadowsocks-rust..."
-    if curl -L -o /tmp/shadowsocks.tar.xz "$ss_url" --connect-timeout 30 --retry 3; then
-        mkdir -p /tmp/shadowsocks
-        tar -xf /tmp/shadowsocks.tar.xz -C /tmp/shadowsocks
-        
-        # 找到 sslocal 和 ssserver 二进制文件
-        local sslocal_bin=$(find /tmp/shadowsocks -name "sslocal" -type f | head -1)
-        local ssserver_bin=$(find /tmp/shadowsocks -name "ssserver" -type f | head -1)
-        
-        if [[ -n "$sslocal_bin" ]] && [[ -f "$sslocal_bin" ]]; then
-            cp "$sslocal_bin" "$BIN_DIR/sslocal"
-            chmod +x "$BIN_DIR/sslocal"
-            print_success "sslocal 安装成功"
-        fi
-        
-        if [[ -n "$ssserver_bin" ]] && [[ -f "$ssserver_bin" ]]; then
-            cp "$ssserver_bin" "$BIN_DIR/ssserver"
-            chmod +x "$BIN_DIR/ssserver"
-            print_success "ssserver 安装成功"
-        fi
-        
-        # 清理临时文件
-        rm -rf /tmp/shadowsocks /tmp/shadowsocks.tar.xz
-        
-        # 验证安装
-        if command -v ssserver &> /dev/null; then
-            print_success "Shadowsocks-rust 安装完成"
-            return 0
-        else
-            print_error "Shadowsocks-rust 安装失败"
-            return 1
-        fi
-    else
-        print_error "Shadowsocks-rust 下载失败"
-        
-        # 尝试使用 apt 安装
-        print_info "尝试使用 apt 安装 Shadowsocks..."
-        if apt-get install -y shadowsocks-libev 2>/dev/null; then
-            print_success "Shadowsocks-libev 安装成功"
-            # 设置二进制文件路径
-            ln -sf /usr/bin/ss-server "$BIN_DIR/ssserver"
-            ln -sf /usr/bin/ss-local "$BIN_DIR/sslocal"
-            return 0
-        else
-            print_error "无法安装 Shadowsocks"
-            return 1
-        fi
-    fi
-}
-
-# ----------------------------
-# Cloudflare 授权
-# ----------------------------
-direct_cloudflare_auth() {
     echo ""
-    print_auth "═══════════════════════════════════════════════"
-    print_auth "         Cloudflare 授权                      "
-    print_auth "═══════════════════════════════════════════════"
+    log_success "配置摘要："
+    echo "  域名: $DOMAIN"
+    echo "  Shadowsocks 端口: $SS_PORT"
+    echo "  加密方法: $SS_METHOD"
+    echo "  密码: $SS_PASSWORD"
     echo ""
     
-    # 清理旧的授权文件
-    rm -rf /root/.cloudflared 2>/dev/null
-    mkdir -p /root/.cloudflared
+    log_input "确认配置无误？[Y/n]:"
+    read -r confirm
+    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+        get_user_config
+    fi
+}
+
+# ----------------------------
+# Cloudflare 授权（新方法）
+# ----------------------------
+cloudflare_auth() {
+    echo ""
+    log_info "═══════════════════════════════════════════════"
+    log_info "         Cloudflare 账户授权"
+    log_info "═══════════════════════════════════════════════"
+    echo ""
     
+    log_info "方法1：Web 界面授权（推荐）"
     echo "请按以下步骤操作："
-    echo "1. 脚本将显示一个 Cloudflare 授权链接"
-    echo "2. 复制链接到浏览器打开"
-    echo "3. 登录您的 Cloudflare 账户"
-    echo "4. 选择您要使用的域名并授权"
-    echo "5. 返回终端按回车继续"
+    echo "  1. 打开 https://dash.cloudflare.com/"
+    echo "  2. 登录您的 Cloudflare 账户"
+    echo "  3. 进入 Zero Trust → Networks → Tunnels"
+    echo "  4. 点击 'Create a tunnel'"
+    echo "  5. 选择 'cloudflared' 方式"
+    echo "  6. 复制 Tunnel Token"
     echo ""
     
-    print_input "按回车开始授权..."
+    log_input "是否已有 Tunnel Token？[y/N]:"
+    read -r has_token
+    
+    if [[ "$has_token" =~ ^[Yy]$ ]]; then
+        log_input "请输入 Tunnel Token："
+        read -r tunnel_token
+        
+        # 使用 Token 创建隧道
+        create_tunnel_with_token "$tunnel_token"
+    else
+        # 方法2：命令行授权（备用）
+        log_info "尝试命令行授权..."
+        command_line_auth
+    fi
+}
+
+# ----------------------------
+# 使用 Token 创建隧道
+# ----------------------------
+create_tunnel_with_token() {
+    local token="$1"
+    
+    log_info "使用 Token 创建隧道..."
+    
+    # 创建配置目录
+    mkdir -p ~/.cloudflared
+    mkdir -p "$CONFIG_DIR"
+    
+    # 将 Token 写入配置文件
+    echo "$token" > ~/.cloudflared/token.json
+    
+    # 创建隧道
+    if "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME" --token "$token"; then
+        log_success "隧道创建成功"
+        
+        # 获取凭证文件
+        local cred_file=$(find ~/.cloudflared -name "*.json" -type f | head -1)
+        
+        if [ -n "$cred_file" ]; then
+            log_success "找到凭证文件: $(basename "$cred_file")"
+            
+            # 保存配置
+            cat > "$CONFIG_DIR/tunnel.conf" << EOF
+TUNNEL_NAME=$TUNNEL_NAME
+TUNNEL_TOKEN=$token
+CREDENTIALS_FILE=$cred_file
+DOMAIN=$DOMAIN
+SS_PORT=$SS_PORT
+SS_METHOD=$SS_METHOD
+SS_PASSWORD=$SS_PASSWORD
+CREATED=$(date +"%Y-%m-%d %H:%M:%S")
+EOF
+            
+            return 0
+        fi
+    fi
+    
+    log_error "使用 Token 创建隧道失败"
+    return 1
+}
+
+# ----------------------------
+# 命令行授权（备用）
+# ----------------------------
+command_line_auth() {
+    log_info "开始命令行授权流程..."
+    
+    # 清理旧配置
+    rm -rf ~/.cloudflared/* 2>/dev/null
+    
+    echo ""
+    echo "================================================"
+    echo "重要：请确保服务器可以访问以下地址："
+    echo "  - https://api.cloudflare.com"
+    echo "  - https://region*.v2.argotunnel.com"
+    echo "================================================"
+    echo ""
+    
+    log_input "按回车键开始授权..."
     read -r
     
+    # 运行授权命令并显示链接
     echo ""
-    echo "=============================================="
-    echo "请复制以下链接到浏览器："
-    echo ""
+    echo "请复制以下链接到浏览器打开："
+    echo "════════════════════════════════════════════════"
     
-    # 运行授权命令
-    echo "正在生成授权链接..."
-    
-    local auth_output
-    if auth_output=$("$BIN_DIR/cloudflared" tunnel login 2>&1); then
-        echo "$auth_output"
-    else
-        print_error "授权命令执行失败"
-        echo "$auth_output"
-        return 1
+    # 使用 timeout 防止卡住
+    if ! timeout 60 "$BIN_DIR/cloudflared" tunnel login; then
+        log_error "授权超时"
+        log_info "请手动创建隧道："
+        echo "  1. 访问：https://dash.cloudflare.com/"
+        echo "  2. Zero Trust → Networks → Tunnels"
+        echo "  3. Create a tunnel → cloudflared"
+        echo "  4. 复制 Tunnel Token"
+        echo ""
+        log_input "请输入获取到的 Token："
+        read -r manual_token
+        create_tunnel_with_token "$manual_token"
+        return $?
     fi
     
+    echo "════════════════════════════════════════════════"
     echo ""
-    echo "=============================================="
-    print_input "完成授权后按回车继续..."
+    log_input "授权完成后按回车继续..."
     read -r
     
     # 检查授权结果
-    if [[ -f "/root/.cloudflared/cert.pem" ]]; then
-        print_success "✅ 授权成功！找到证书文件"
+    if [ -f ~/.cloudflared/cert.pem ]; then
+        log_success "授权成功"
         
-        # 检查凭证文件
-        local json_files=(/root/.cloudflared/*.json)
-        if [ -e "${json_files[0]}" ]; then
-            print_success "✅ 找到凭证文件: $(basename "${json_files[0]}")"
-        fi
+        # 创建隧道
+        log_info "创建隧道: $TUNNEL_NAME"
+        "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME"
         
         return 0
     else
-        print_error "❌ 授权失败：未找到证书文件"
-        print_info "请确保："
-        echo "  1. 正确登录 Cloudflare 账户"
-        echo "  2. 选择正确的域名"
-        echo "  3. 授权过程完整"
+        log_error "授权失败，未找到证书文件"
         return 1
     fi
-}
-
-# ----------------------------
-# 创建隧道和配置
-# ----------------------------
-setup_tunnel() {
-    print_info "设置 Cloudflare Tunnel..."
-    
-    if [[ ! -f "/root/.cloudflared/cert.pem" ]]; then
-        print_error "❌ 未找到证书文件，请先完成授权"
-        exit 1
-    fi
-    
-    # 删除可能存在的同名隧道
-    "$BIN_DIR/cloudflared" tunnel delete -f "$TUNNEL_NAME" 2>/dev/null || true
-    sleep 2
-    
-    # 创建新隧道
-    print_info "创建隧道: $TUNNEL_NAME"
-    if timeout 60 "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME"; then
-        sleep 3
-        print_success "✅ 隧道创建成功"
-    else
-        print_error "❌ 无法创建隧道"
-        exit 1
-    fi
-    
-    # 获取隧道ID和凭证文件
-    local json_file=$(ls -t /root/.cloudflared/*.json 2>/dev/null | head -1)
-    local tunnel_id=$("$BIN_DIR/cloudflared" tunnel list 2>/dev/null | grep "$TUNNEL_NAME" | awk '{print $1}')
-    
-    if [[ -z "$tunnel_id" ]]; then
-        print_error "❌ 无法获取隧道ID"
-        exit 1
-    fi
-    
-    # 绑定域名（如果是自有域名）
-    if [[ "$USER_DOMAIN" != argo.example.com ]] && [[ ! "$USER_DOMAIN" =~ ^(cf\.|cdn\.) ]]; then
-        print_info "绑定域名: $USER_DOMAIN"
-        "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN" > /dev/null 2>&1
-        print_success "✅ 域名绑定成功"
-    else
-        print_info "使用优选域名，无需 DNS 绑定"
-    fi
-    
-    # 创建配置目录
-    mkdir -p "$CONFIG_DIR"
-    
-    # 保存隧道配置
-    cat > "$CONFIG_DIR/tunnel.conf" << EOF
-TUNNEL_ID=$tunnel_id
-TUNNEL_NAME=$TUNNEL_NAME
-DOMAIN=$USER_DOMAIN
-SS_PORT=$SHADOWSOCKS_PORT
-SS_METHOD=$SHADOWSOCKS_METHOD
-SS_PASSWORD=$SHADOWSOCKS_PASSWORD
-CERT_PATH=/root/.cloudflared/cert.pem
-CREDENTIALS_FILE=$json_file
-CREATED_DATE=$(date +"%Y-%m-%d")
-EOF
-    
-    print_success "隧道设置完成"
 }
 
 # ----------------------------
 # 配置 Shadowsocks
 # ----------------------------
 configure_shadowsocks() {
-    print_info "配置 Shadowsocks..."
+    log_info "配置 Shadowsocks 服务..."
+    
+    # 创建配置目录
+    mkdir -p "$CONFIG_DIR"
+    mkdir -p "$LOG_DIR"
     
     # 创建 Shadowsocks 配置文件
     cat > "$CONFIG_DIR/shadowsocks.json" << EOF
 {
     "server": "127.0.0.1",
-    "server_port": $SHADOWSOCKS_PORT,
-    "password": "$SHADOWSOCKS_PASSWORD",
-    "method": "$SHADOWSOCKS_METHOD",
+    "server_port": $SS_PORT,
+    "password": "$SS_PASSWORD",
+    "method": "$SS_METHOD",
     "mode": "tcp_and_udp",
-    "fast_open": true,
     "timeout": 300,
+    "fast_open": true,
+    "no_delay": true,
+    "ipv6_first": false,
+    "dns": "1.1.1.1",
     "plugin": "",
-    "plugin_opts": "",
-    "user": "nobody",
-    "workers": 2,
-    "nameserver": "1.1.1.1",
-    "tcp_no_delay": true,
-    "keep_alive": 30
+    "plugin_opts": ""
 }
 EOF
     
-    # 创建 Shadowsocks 启动脚本
-    cat > "$CONFIG_DIR/start-ss.sh" << 'EOF'
-#!/bin/bash
-CONFIG_DIR="/etc/ss-argo"
-LOG_DIR="/var/log/ss-argo"
-
-# 停止已有的 ssserver
-pkill -f "ssserver" || true
-sleep 1
-
-# 启动 Shadowsocks 服务器
-if command -v ssserver &> /dev/null; then
-    ssserver -c "$CONFIG_DIR/shadowsocks.json" --log-without-time > "$LOG_DIR/ss.log" 2>&1 &
-    echo $! > /tmp/ss-server.pid
-    echo "Shadowsocks 启动成功"
-else
-    echo "错误: ssserver 未找到"
-    exit 1
-fi
-EOF
-    
-    chmod +x "$CONFIG_DIR/start-ss.sh"
-    
-    print_success "Shadowsocks 配置完成"
+    log_success "Shadowsocks 配置完成"
 }
 
 # ----------------------------
 # 配置 Cloudflared
 # ----------------------------
 configure_cloudflared() {
-    print_info "配置 cloudflared..."
+    log_info "配置 Cloudflared 隧道..."
     
-    local tunnel_id=$(grep "^TUNNEL_ID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local json_file=$(grep "^CREDENTIALS_FILE=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local ss_port=$(grep "^SS_PORT=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    # 获取凭证文件
+    local cred_file=$(find ~/.cloudflared -name "*.json" -type f | head -1)
     
-    # 创建 cloudflared 配置文件
+    if [ -z "$cred_file" ]; then
+        log_error "未找到隧道凭证文件"
+        return 1
+    fi
+    
+    # 创建 Cloudflared 配置文件
     cat > "$CONFIG_DIR/config.yaml" << EOF
-tunnel: $tunnel_id
-credentials-file: $json_file
-logfile: $LOG_DIR/argo.log
+tunnel: $TUNNEL_NAME
+credentials-file: $cred_file
+logfile: $LOG_DIR/cloudflared.log
 loglevel: info
-transport-loglevel: info
-no-autoupdate: true
-
-# 连接优化参数
-retries: 10
-ha-connections: 4
-connection-idle-timeout: 1m30s
-graceful-shutdown: 2s
-request-timeout: 1m30s
-
-# 隧道配置
-protocol: quic
-heartbeat-interval: 5s
-metrics: 0.0.0.0:41784
-no-tls-verify: false
 
 ingress:
-  - hostname: $domain
-    service: tcp://localhost:$ss_port
-    originRequest:
-      connectTimeout: 15s
-      tlsTimeout: 10s
-      tcpKeepAlive: 15s
-      noHappyEyeballs: false
-      keepAliveConnections: 10
-      keepAliveTimeout: 1m30s
-      httpHostHeader: $domain
-      caPool: /etc/ssl/certs/ca-certificates.crt
+  - hostname: $DOMAIN
+    service: tcp://localhost:$SS_PORT
   - service: http_status:404
 EOF
     
-    print_success "cloudflared 配置完成"
+    log_success "Cloudflared 配置完成"
 }
 
 # ----------------------------
 # 配置系统服务
 # ----------------------------
 configure_services() {
-    print_info "配置系统服务..."
-    
-    # 创建日志目录
-    mkdir -p "$LOG_DIR"
+    log_info "配置系统服务..."
     
     # 创建服务用户
     if ! id -u "$SERVICE_USER" &> /dev/null; then
         useradd -r -s /usr/sbin/nologin "$SERVICE_USER"
     fi
     
-    # 设置目录权限
-    chown -R "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR" "$LOG_DIR"
+    # 设置权限
+    chown -R "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR" "$LOG_DIR"
     
-    # 创建 Shadowsocks 服务
-    cat > /etc/systemd/system/ss-argo-shadowsocks.service << EOF
+    # Shadowsocks 服务
+    cat > /etc/systemd/system/argo-ss.service << EOF
 [Unit]
-Description=Shadowsocks Server for Argo Tunnel
+Description=Argo Shadowsocks Server
 After=network.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=$SERVICE_USER
-Group=$SERVICE_GROUP
+Group=$SERVICE_USER
 ExecStart=$BIN_DIR/ssserver -c $CONFIG_DIR/shadowsocks.json
 Restart=always
 RestartSec=3
@@ -654,11 +587,11 @@ LimitNOFILE=51200
 WantedBy=multi-user.target
 EOF
     
-    # 创建 Cloudflared 服务
-    cat > /etc/systemd/system/ss-argo-cloudflared.service << EOF
+    # Cloudflared 服务
+    cat > /etc/systemd/system/argo-tunnel.service << EOF
 [Unit]
-Description=Shadowsocks Argo Tunnel Service
-After=network.target ss-argo-shadowsocks.service
+Description=Argo Tunnel Service
+After=network.target argo-ss.service
 Wants=network-online.target
 
 [Service]
@@ -666,13 +599,11 @@ Type=simple
 User=root
 Group=root
 Environment="TUNNEL_ORIGIN_CERT=/root/.cloudflared/cert.pem"
-Environment="TUNNEL_FORCE_PROTOCOL=quic"
-ExecStart=$BIN_DIR/cloudflared tunnel --config $CONFIG_DIR/config.yaml run $TUNNEL_NAME
+ExecStart=$BIN_DIR/cloudflared tunnel --config $CONFIG_DIR/config.yaml run
 Restart=always
 RestartSec=5
-StartLimitInterval=0
-StandardOutput=append:$LOG_DIR/argo.log
-StandardError=append:$LOG_DIR/argo-error.log
+StandardOutput=append:$LOG_DIR/tunnel.log
+StandardError=append:$LOG_DIR/tunnel-error.log
 
 [Install]
 WantedBy=multi-user.target
@@ -681,496 +612,229 @@ EOF
     # 重载 systemd
     systemctl daemon-reload
     
-    print_success "系统服务配置完成"
+    log_success "系统服务配置完成"
 }
 
 # ----------------------------
 # 启动服务
 # ----------------------------
 start_services() {
-    print_info "启动服务..."
+    log_info "启动服务..."
     
     # 停止可能存在的旧服务
-    systemctl stop ss-argo-cloudflared.service 2>/dev/null || true
-    systemctl stop ss-argo-shadowsocks.service 2>/dev/null || true
+    systemctl stop argo-tunnel.service 2>/dev/null || true
+    systemctl stop argo-ss.service 2>/dev/null || true
     
-    # 启动 Shadowsocks 服务
-    print_info "启动 Shadowsocks..."
-    systemctl enable ss-argo-shadowsocks.service --now
+    # 启动 Shadowsocks
+    log_info "启动 Shadowsocks..."
+    systemctl enable --now argo-ss.service
     
-    if systemctl is-active --quiet ss-argo-shadowsocks.service; then
-        print_success "✅ Shadowsocks 启动成功"
+    if systemctl is-active --quiet argo-ss.service; then
+        log_success "Shadowsocks 启动成功"
     else
-        print_error "❌ Shadowsocks 启动失败"
-        journalctl -u ss-argo-shadowsocks.service -n 20 --no-pager
+        log_error "Shadowsocks 启动失败"
+        journalctl -u argo-ss.service -n 20 --no-pager
         return 1
     fi
     
-    # 启动 Cloudflared 服务
-    print_info "启动 Cloudflared..."
-    systemctl enable ss-argo-cloudflared.service --now
+    # 启动 Cloudflared
+    log_info "启动 Cloudflared 隧道..."
+    systemctl enable --now argo-tunnel.service
     
     # 等待隧道连接
     local wait_time=0
-    local max_wait=60
+    log_info "等待隧道连接（最多30秒）..."
     
-    print_info "等待隧道连接建立（最多60秒）..."
-    
-    while [[ $wait_time -lt $max_wait ]]; do
-        if systemctl is-active --quiet ss-argo-cloudflared.service; then
-            # 检查隧道状态
-            local tunnel_status=$("$BIN_DIR/cloudflared" tunnel info "$TUNNEL_NAME" 2>/dev/null | grep -i "status\|conns" || true)
-            
-            if echo "$tunnel_status" | grep -q "running\|active"; then
-                print_success "✅ Cloudflared 服务运行中"
-                print_info "隧道状态:"
-                echo "$tunnel_status"
-                break
-            fi
+    while [ $wait_time -lt 30 ]; do
+        if systemctl is-active --quiet argo-tunnel.service; then
+            log_success "Cloudflared 启动成功"
+            break
         fi
-        
-        if [[ $((wait_time % 15)) -eq 0 ]] && [[ $wait_time -gt 0 ]]; then
-            print_info "已等待 ${wait_time}秒..."
-        fi
-        
-        sleep 3
-        ((wait_time+=3))
+        sleep 2
+        ((wait_time+=2))
     done
     
-    if [[ $wait_time -ge $max_wait ]]; then
-        print_warning "⚠️  隧道连接较慢，服务可能在后台继续建立连接"
-        print_info "查看实时日志: journalctl -u ss-argo-cloudflared.service -f"
+    if [ $wait_time -ge 30 ]; then
+        log_warning "隧道启动较慢，请稍后检查状态"
     fi
     
     return 0
-}
-
-# ----------------------------
-# 生成 v2rayN 配置文件
-# ----------------------------
-generate_v2rayn_config() {
-    print_info "生成 v2rayN 配置文件..."
-    
-    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local password=$(grep "^SS_PASSWORD=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local method=$(grep "^SS_METHOD=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    
-    # 生成 Shadowsocks 链接
-    local ss_link=$(echo -n "${method}:${password}@${domain}:443" | base64 -w 0)
-    ss_link="ss://${ss_link}#Argo-Shadowsocks"
-    
-    # 生成 v2rayN JSON 配置
-    cat > "$CONFIG_DIR/v2rayN.json" << EOF
-{
-    "remarks": "Argo-Shadowsocks",
-    "server": "$domain",
-    "server_port": 443,
-    "password": "$password",
-    "method": "$method",
-    "plugin": "",
-    "plugin_opts": "",
-    "timeout": 300,
-    "fast_open": true,
-    "protocol": "origin",
-    "protocol_param": "",
-    "obfs": "plain",
-    "obfs_param": "",
-    "udp": true,
-    "tcp": true
-}
-EOF
-    
-    # 生成 Clash 配置
-    cat > "$CONFIG_DIR/clash.yaml" << EOF
-proxies:
-  - name: "Argo-Shadowsocks"
-    type: ss
-    server: $domain
-    port: 443
-    cipher: $method
-    password: "$password"
-    udp: true
-    plugin: ""
-    plugin-opts: {}
-    
-proxy-groups:
-  - name: "PROXY"
-    type: select
-    proxies:
-      - "Argo-Shadowsocks"
-
-rules:
-  - "MATCH,PROXY"
-EOF
-    
-    # 生成客户端配置文件
-    cat > "$CONFIG_DIR/client-guide.md" << EOF
-# Shadowsocks 客户端配置指南
-
-## 连接信息
-- 服务器地址: $domain
-- 端口: 443
-- 密码: $password
-- 加密方法: $method
-- 协议: origin
-- 混淆: plain
-
-## v2rayN 配置
-1. 打开 v2rayN
-2. 点击 "服务器" -> "添加[Shadowsocks]服务器"
-3. 填写以下信息：
-   - 地址(Address): $domain
-   - 端口(Port): 443
-   - 密码(Password): $password
-   - 加密方式(Encryption): $method
-4. 点击 "确定" 保存
-
-## 通用 Shadowsocks 链接
-\`\`\`
-$ss_link
-\`\`\`
-
-## Clash 配置
-配置文件已生成: \`$CONFIG_DIR/clash.yaml\`
-
-## 注意事项
-1. 确保使用 TCP 协议
-2. 首次连接可能需要等待隧道建立（1-2分钟）
-3. 如果连接失败，尝试更换优选域名
-EOF
-    
-    echo ""
-    print_success "✅ v2rayN 配置文件生成完成"
-    echo "配置文件位置: $CONFIG_DIR/"
-    echo ""
-    print_info "📋 Shadowsocks 链接:"
-    echo "$ss_link"
-    echo ""
-    print_info "📱 二维码:"
-    if command -v qrencode &> /dev/null; then
-        qrencode -t utf8 <<< "$ss_link"
-    else
-        echo "安装 qrencode 以生成二维码: apt-get install -y qrencode"
-    fi
 }
 
 # ----------------------------
 # 显示连接信息
 # ----------------------------
 show_connection_info() {
-    print_info "═══════════════════════════════════════════════"
-    print_info "           安装完成！连接信息"
-    print_info "═══════════════════════════════════════════════"
+    echo ""
+    log_info "═══════════════════════════════════════════════"
+    log_info "             安装完成！连接信息"
+    log_info "═══════════════════════════════════════════════"
     echo ""
     
-    if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
-        print_error "未找到配置文件"
-        return
-    fi
-    
-    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local password=$(grep "^SS_PASSWORD=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local method=$(grep "^SS_METHOD=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    
-    print_success "🔗 服务器地址: $domain"
-    print_success "🚪 端口: 443 (通过 Cloudflare Tunnel)"
-    print_success "🔑 密码: $password"
-    print_success "🔐 加密方法: $method"
-    print_success "📁 配置文件: $CONFIG_DIR/"
+    # 显示配置
+    log_success "🔗 服务器地址: $DOMAIN"
+    log_success "🚪 端口: 443 (Cloudflare Tunnel)"
+    log_success "🔑 密码: $SS_PASSWORD"
+    log_success "🔐 加密: $SS_METHOD"
+    log_success "📁 配置目录: $CONFIG_DIR"
     
     echo ""
     
     # 生成 Shadowsocks 链接
-    local ss_link=$(echo -n "${method}:${password}@${domain}:443" | base64 -w 0)
-    ss_link="ss://${ss_link}#Argo-Shadowsocks"
+    local ss_uri="${SS_METHOD}:${SS_PASSWORD}@${DOMAIN}:443"
+    local ss_link="ss://$(echo -n "$ss_uri" | base64 -w 0)#Argo-Shadowsocks"
     
-    print_info "📋 Shadowsocks 链接:"
+    log_info "📋 Shadowsocks 链接："
     echo "$ss_link"
     echo ""
     
     # 生成二维码
     if command -v qrencode &> /dev/null; then
-        print_info "📱 二维码:"
+        log_info "📱 二维码："
         qrencode -t utf8 <<< "$ss_link"
         echo ""
     fi
     
-    print_info "🧪 服务状态:"
+    # v2rayN 配置说明
+    log_info "🎯 v2rayN 客户端配置："
+    echo "  类型: Shadowsocks"
+    echo "  地址: $DOMAIN"
+    echo "  端口: 443"
+    echo "  密码: $SS_PASSWORD"
+    echo "  加密: $SS_METHOD"
+    echo "  插件: 无"
     echo ""
     
-    if systemctl is-active --quiet ss-argo-shadowsocks.service; then
-        print_success "✅ Shadowsocks 服务: 运行中"
+    # 服务状态
+    log_info "🔧 服务状态："
+    if systemctl is-active --quiet argo-ss.service; then
+        echo "  Shadowsocks: ✅ 运行中"
     else
-        print_error "❌ Shadowsocks 服务: 未运行"
+        echo "  Shadowsocks: ❌ 未运行"
+    fi
+    
+    if systemctl is-active --quiet argo-tunnel.service; then
+        echo "  Argo Tunnel: ✅ 运行中"
+    else
+        echo "  Argo Tunnel: ❌ 未运行"
     fi
     
     echo ""
+    log_info "📝 管理命令："
+    echo "  查看状态: systemctl status argo-tunnel.service"
+    echo "  查看日志: journalctl -u argo-tunnel.service -f"
+    echo "  重启服务: systemctl restart argo-tunnel.service"
+    echo "  卸载脚本: sudo ./argo-ss.sh uninstall"
+}
+
+# ----------------------------
+# 测试连接
+# ----------------------------
+test_connection() {
+    log_info "测试连接性..."
     
-    if systemctl is-active --quiet ss-argo-cloudflared.service; then
-        print_success "✅ Cloudflared 服务: 运行中"
-        
-        echo ""
-        print_info "隧道信息:"
-        "$BIN_DIR/cloudflared" tunnel list 2>/dev/null | grep "$TUNNEL_NAME" || echo "正在获取隧道信息..."
+    echo ""
+    log_info "1. 测试本地 Shadowsocks 服务..."
+    if ss -tlnp | grep ":$SS_PORT" &> /dev/null; then
+        log_success "  Shadowsocks 端口监听正常"
     else
-        print_error "❌ Cloudflared 服务: 未运行"
+        log_error "  Shadowsocks 端口未监听"
     fi
     
     echo ""
-    print_info "📋 v2rayN 配置说明:"
-    echo "  1. 服务器类型选择 Shadowsocks"
-    echo "  2. 地址: $domain"
-    echo "  3. 端口: 443"
-    echo "  4. 密码: $password"
-    echo "  5. 加密: $method"
-    echo "  6. 协议: origin"
-    echo "  7. 混淆: plain"
+    log_info "2. 测试隧道状态..."
+    if systemctl is-active --quiet argo-tunnel.service; then
+        log_success "  Argo Tunnel 服务运行中"
+    else
+        log_error "  Argo Tunnel 服务未运行"
+    fi
+}
+
+# ----------------------------
+# 卸载脚本
+# ----------------------------
+uninstall() {
     echo ""
+    log_warning "⚠️  确认要卸载 Argo Shadowsocks 吗？"
+    log_input "这将删除所有配置和数据 [y/N]: "
+    read -r confirm
     
-    print_info "🔧 管理命令:"
-    echo "  状态检查: sudo ./ss_argo.sh status"
-    echo "  重启服务: systemctl restart ss-argo-cloudflared.service"
-    echo "  查看日志: journalctl -u ss-argo-cloudflared.service -f"
-    echo "  重新生成配置: sudo ./ss_argo.sh config"
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "卸载已取消"
+        return
+    fi
+    
+    log_info "开始卸载..."
+    
+    # 停止服务
+    systemctl stop argo-tunnel.service 2>/dev/null || true
+    systemctl stop argo-ss.service 2>/dev/null || true
+    
+    # 禁用服务
+    systemctl disable argo-tunnel.service 2>/dev/null || true
+    systemctl disable argo-ss.service 2>/dev/null || true
+    
+    # 删除服务文件
+    rm -f /etc/systemd/system/argo-tunnel.service
+    rm -f /etc/systemd/system/argo-ss.service
+    
+    # 删除配置和日志
+    rm -rf "$CONFIG_DIR" "$LOG_DIR"
+    
+    # 删除二进制文件（可选）
+    log_input "是否删除 Cloudflared 和 Shadowsocks 二进制文件？ [y/N]: "
+    read -r delete_bin
+    if [[ "$delete_bin" =~ ^[Yy]$ ]]; then
+        rm -f "$BIN_DIR/cloudflared" "$BIN_DIR/ssserver" "$BIN_DIR/sslocal"
+    fi
+    
+    # 删除 Cloudflare 配置
+    log_input "是否删除 Cloudflare 授权文件？ [y/N]: "
+    read -r delete_auth
+    if [[ "$delete_auth" =~ ^[Yy]$ ]]; then
+        rm -rf ~/.cloudflared
+    fi
+    
+    # 删除用户
+    userdel "$SERVICE_USER" 2>/dev/null || true
+    
+    # 重载 systemd
+    systemctl daemon-reload
+    
+    log_success "卸载完成！"
 }
 
 # ----------------------------
 # 主安装流程
 # ----------------------------
 main_install() {
-    print_info "开始安装流程..."
+    show_banner
     
-    check_system
+    # 检查系统
+    system_check
+    
+    # 安装组件
     install_cloudflared
     install_shadowsocks
-    collect_user_info
+    
+    # 获取配置
+    get_user_config
     
     # Cloudflare 授权
-    if ! direct_cloudflare_auth; then
-        print_warning "授权可能有问题"
-        print_input "是否继续安装？(y/N): "
-        read -r continue_install
-        if [[ "$continue_install" != "y" && "$continue_install" != "Y" ]]; then
-            print_error "安装中止"
-            return 1
-        fi
-    fi
+    cloudflare_auth
     
-    # 设置隧道
-    if ! setup_tunnel; then
-        print_error "隧道设置失败"
-        return 1
-    fi
-    
+    # 配置服务
     configure_shadowsocks
     configure_cloudflared
     configure_services
     
-    if ! start_services; then
-        print_error "服务启动失败"
-        return 1
-    fi
-    
-    generate_v2rayn_config
-    show_connection_info
-    
-    echo ""
-    print_success "🎉 安装完成！"
-    return 0
-}
-
-# ----------------------------
-# 卸载功能
-# ----------------------------
-uninstall_all() {
-    print_info "开始卸载 Argo Shadowsocks..."
-    echo ""
-    
-    print_warning "⚠️  警告：此操作将删除所有配置和数据！"
-    print_input "确认要卸载吗？(y/N): "
-    read -r confirm
-    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-        print_info "卸载已取消"
-        return
-    fi
-    
-    echo ""
-    print_info "停止服务..."
-    
-    systemctl stop ss-argo-cloudflared.service 2>/dev/null || true
-    systemctl stop ss-argo-shadowsocks.service 2>/dev/null || true
-    
-    systemctl disable ss-argo-cloudflared.service 2>/dev/null || true
-    systemctl disable ss-argo-shadowsocks.service 2>/dev/null || true
-    
-    rm -f /etc/systemd/system/ss-argo-cloudflared.service
-    rm -f /etc/systemd/system/ss-argo-shadowsocks.service
-    
-    print_input "是否删除 Cloudflare 隧道？(y/N): "
-    read -r delete_tunnel
-    if [[ "$delete_tunnel" == "y" || "$delete_tunnel" == "Y" ]]; then
-        print_info "删除 Cloudflare 隧道..."
-        "$BIN_DIR/cloudflared" tunnel delete -f "$TUNNEL_NAME" 2>/dev/null || true
-    fi
-    
-    rm -rf "$CONFIG_DIR" "$LOG_DIR"
-    
-    print_input "是否删除 Shadowsocks 和 cloudflared 二进制文件？(y/N): "
-    read -r delete_bin
-    if [[ "$delete_bin" == "y" || "$delete_bin" == "Y" ]]; then
-        rm -f "$BIN_DIR/ssserver" "$BIN_DIR/sslocal" "$BIN_DIR/cloudflared"
-    fi
-    
-    print_input "是否删除 Cloudflare 授权文件？(y/N): "
-    read -r delete_auth
-    if [[ "$delete_auth" == "y" || "$delete_auth" == "Y" ]]; then
-        rm -rf /root/.cloudflared
-    fi
-    
-    userdel "$SERVICE_USER" 2>/dev/null || true
-    groupdel "$SERVICE_GROUP" 2>/dev/null || true
-    
-    systemctl daemon-reload
-    
-    echo ""
-    print_success "✅ 卸载完成！"
-}
-
-# ----------------------------
-# 显示配置信息
-# ----------------------------
-show_config() {
-    if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
-        print_error "未找到配置文件，可能未安装"
-        return 1
-    fi
-    
-    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
-    local password=$(grep "^SS_PASSWORD=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
-    local method=$(grep "^SS_METHOD=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
-    
-    echo ""
-    print_success "当前配置:"
-    echo "  域名: $domain"
-    echo "  隧道名称: $TUNNEL_NAME"
-    echo "  Shadowsocks 端口: $SHADOWSOCKS_PORT"
-    echo "  加密方法: $method"
-    echo "  密码: $password"
-    echo ""
-    
-    # 生成 Shadowsocks 链接
-    local ss_link=$(echo -n "${method}:${password}@${domain}:443" | base64 -w 0)
-    ss_link="ss://${ss_link}#Argo-Shadowsocks"
-    
-    print_info "📡 Shadowsocks 链接:"
-    echo "$ss_link"
-    echo ""
-    
-    if command -v qrencode &> /dev/null; then
-        print_info "📱 二维码:"
-        qrencode -t utf8 <<< "$ss_link"
-        echo ""
-    fi
-}
-
-# ----------------------------
-# 重新生成配置文件
-# ----------------------------
-regenerate_config() {
-    print_info "重新生成配置文件..."
-    
-    if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
-        print_error "未找到配置文件，可能未安装"
-        return 1
-    fi
-    
-    configure_shadowsocks
-    configure_cloudflared
-    generate_v2rayn_config
-    
-    print_success "✅ 配置文件已重新生成"
-    
-    # 重启服务
-    print_info "重启服务..."
-    systemctl restart ss-argo-shadowsocks.service
-    systemctl restart ss-argo-cloudflared.service
-    
-    show_config
-}
-
-# ----------------------------
-# 显示服务状态
-# ----------------------------
-show_status() {
-    print_info "服务状态检查..."
-    echo ""
-    
-    if systemctl is-active --quiet ss-argo-shadowsocks.service; then
-        print_success "Shadowsocks 服务: 运行中"
-        echo "监听端口: $SHADOWSOCKS_PORT"
-        echo "进程:"
-        ps aux | grep "ssserver" | grep -v grep || true
+    # 启动服务
+    if start_services; then
+        test_connection
+        show_connection_info
+        log_success "🎉 安装完成！"
     else
-        print_error "Shadowsocks 服务: 未运行"
-    fi
-    
-    echo ""
-    
-    if systemctl is-active --quiet ss-argo-cloudflared.service; then
-        print_success "Cloudflared 服务: 运行中"
-        
-        echo ""
-        print_info "隧道信息:"
-        "$BIN_DIR/cloudflared" tunnel list 2>/dev/null || true
-        
-        echo ""
-        print_info "隧道连接状态:"
-        "$BIN_DIR/cloudflared" tunnel info "$TUNNEL_NAME" 2>/dev/null || echo "无法获取隧道详情"
-    else
-        print_error "Cloudflared 服务: 未运行"
-    fi
-    
-    # 检查端口监听
-    echo ""
-    print_info "端口监听状态:"
-    ss -tlnp | grep ":$SHADOWSOCKS_PORT" || echo "Shadowsocks 端口未监听"
-}
-
-# ----------------------------
-# 测试连接性
-# ----------------------------
-test_connection() {
-    print_info "测试连接性..."
-    
-    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
-    
-    if [[ -z "$domain" ]]; then
-        print_error "未找到域名配置"
-        return 1
-    fi
-    
-    echo ""
-    print_info "1. 测试域名解析..."
-    if nslookup "$domain" > /dev/null 2>&1; then
-        print_success "✅ 域名解析正常"
-    else
-        print_warning "⚠️  域名解析可能有问题"
-    fi
-    
-    echo ""
-    print_info "2. 测试 Cloudflare Tunnel 连接..."
-    if timeout 10 curl -s "https://$domain" --head | grep -q "HTTP"; then
-        print_success "✅ Cloudflare Tunnel 连接正常"
-    else
-        print_warning "⚠️  Cloudflare Tunnel 连接测试失败"
-    fi
-    
-    echo ""
-    print_info "3. 测试 Shadowsocks 服务..."
-    if ss -tlnp | grep -q ":$SHADOWSOCKS_PORT"; then
-        print_success "✅ Shadowsocks 服务运行中"
-    else
-        print_error "❌ Shadowsocks 服务未运行"
+        log_error "安装过程中出现问题"
     fi
 }
 
@@ -1178,72 +842,53 @@ test_connection() {
 # 显示菜单
 # ----------------------------
 show_menu() {
-    show_title
+    show_banner
     
     echo "请选择操作："
     echo ""
     echo "  1) 安装 Argo + Shadowsocks"
-    echo "  2) 卸载 Argo + Shadowsocks"
+    echo "  2) 卸载"
     echo "  3) 查看服务状态"
-    echo "  4) 查看配置信息"
-    echo "  5) 重新生成配置文件"
-    echo "  6) 测试连接性"
-    echo "  7) 退出"
+    echo "  4) 测试连接"
+    echo "  5) 退出"
     echo ""
     
-    print_input "请输入选项 (1-7): "
+    log_input "请输入选项 [1-5]: "
     read -r choice
     
     case "$choice" in
         1)
-            SILENT_MODE=false
-            if main_install; then
-                echo ""
-                print_input "按回车键返回菜单..."
-                read -r
-            else
-                echo ""
-                print_error "安装失败"
-                print_input "按回车键返回菜单..."
-                read -r
-            fi
+            main_install
+            echo ""
+            log_input "按回车键返回菜单..."
+            read -r
             ;;
         2)
-            uninstall_all
+            uninstall
             echo ""
-            print_input "按回车键返回菜单..."
+            log_input "按回车键返回菜单..."
             read -r
             ;;
         3)
-            show_status
             echo ""
-            print_input "按回车键返回菜单..."
+            systemctl status argo-tunnel.service --no-pager
+            systemctl status argo-ss.service --no-pager
+            echo ""
+            log_input "按回车键返回菜单..."
             read -r
             ;;
         4)
-            show_config
+            test_connection
             echo ""
-            print_input "按回车键返回菜单..."
+            log_input "按回车键返回菜单..."
             read -r
             ;;
         5)
-            regenerate_config
-            echo ""
-            print_input "按回车键返回菜单..."
-            read -r
-            ;;
-        6)
-            test_connection
-            echo ""
-            print_input "按回车键返回菜单..."
-            read -r
-            ;;
-        7)
-            print_info "再见！"
+            log_info "再见！"
             exit 0
             ;;
         *)
-            print_error "无效选项"
+            log_error "无效选项"
             sleep 1
             ;;
     esac
@@ -1252,63 +897,50 @@ show_menu() {
 }
 
 # ----------------------------
-# 主函数
+# 脚本入口
 # ----------------------------
 main() {
-    case "${1:-}" in
-        "install")
-            SILENT_MODE=false
-            show_title
-            main_install
-            ;;
-        "uninstall")
-            show_title
-            uninstall_all
-            ;;
-        "config")
-            show_title
-            show_config
-            ;;
-        "status")
-            show_title
-            show_status
-            ;;
-        "regenerate")
-            show_title
-            regenerate_config
-            ;;
-        "test")
-            show_title
-            test_connection
-            ;;
-        "-y"|"--silent")
-            SILENT_MODE=true
-            show_title
-            main_install
-            ;;
-        "menu"|"")
-            show_menu
-            ;;
-        *)
-            show_title
-            echo "使用方法:"
-            echo "  sudo ./ss_argo.sh menu          # 显示菜单"
-            echo "  sudo ./ss_argo.sh install       # 安装"
-            echo "  sudo ./ss_argo.sh uninstall     # 卸载"
-            echo "  sudo ./ss_argo.sh status        # 查看状态"
-            echo "  sudo ./ss_argo.sh config        # 查看配置"
-            echo "  sudo ./ss_argo.sh regenerate    # 重新生成配置"
-            echo "  sudo ./ss_argo.sh test          # 测试连接"
-            echo "  sudo ./ss_argo.sh -y            # 静默安装"
-            exit 1
-            ;;
-    esac
+    # 如果没有参数，显示菜单
+    if [ $# -eq 0 ]; then
+        show_menu
+    else
+        case "$1" in
+            "install")
+                main_install
+                ;;
+            "uninstall")
+                uninstall
+                ;;
+            "status")
+                systemctl status argo-tunnel.service --no-pager
+                systemctl status argo-ss.service --no-pager
+                ;;
+            "test")
+                test_connection
+                ;;
+            "-h"|"--help")
+                echo "使用方法:"
+                echo "  sudo ./argo-ss.sh install      # 安装"
+                echo "  sudo ./argo-ss.sh uninstall    # 卸载"
+                echo "  sudo ./argo-ss.sh status       # 查看状态"
+                echo "  sudo ./argo-ss.sh test         # 测试连接"
+                echo "  sudo ./argo-ss.sh              # 显示菜单"
+                ;;
+            *)
+                echo "未知参数: $1"
+                echo "使用 --help 查看帮助"
+                exit 1
+                ;;
+        esac
+    fi
 }
 
-# 检查是否以root运行
-if [[ $EUID -ne 0 ]] && [[ "${1:-}" != "" ]]; then
-    print_error "请使用root权限运行此脚本"
+# 检查 root 权限
+if [ "$EUID" -ne 0 ]; then
+    echo "请使用 root 权限运行此脚本"
+    echo "例如: sudo ./argo-ss.sh"
     exit 1
 fi
 
+# 运行主函数
 main "$@"
