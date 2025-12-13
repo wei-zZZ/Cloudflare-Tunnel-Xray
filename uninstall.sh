@@ -1,4 +1,3 @@
-cat > uninstall_secure_tunnel.sh << 'EOF'
 #!/bin/bash
 # ============================================
 # Cloudflare Tunnel 完全卸载脚本
@@ -199,10 +198,3 @@ print_warning "⚠️ 注意："
 print_warning "1. Cloudflare隧道可能需要手动清理"
 print_warning "2. DNS记录可能需要手动删除"
 print_warning "3. 如果重新安装失败，可能需要重启服务器"
-EOF
-
-# 给脚本执行权限
-chmod +x uninstall_secure_tunnel.sh
-
-echo "✅ 卸载脚本已创建：uninstall_secure_tunnel.sh"
-echo "使用方法：sudo ./uninstall_secure_tunnel.sh"
