@@ -167,14 +167,25 @@ direct_cloudflare_auth() {
         print_success "cloudflared 已安装，您可以运行 'cloudflared tunnel login' 来完成授权。"
         
         # 获取并显示授权链接
-        print_info "授权链接："
-        cloudflared tunnel login
+        print_info "开始获取授权链接，请稍等..."
+        
+        # 捕获 cloudflared tunnel login 输出，并提取授权链接
+        AUTH_URL=$(cloudflared tunnel login 2>&1 | grep -o 'https://.*cloudflare.com.*' | head -n 1)
+        
+        if [ -n "$AUTH_URL" ]; then
+            print_info "授权链接已生成：$AUTH_URL"
+            print_info "请在浏览器中打开该链接进行授权。"
+        else
+            print_error "未能获取到授权链接，请检查您的环境配置。"
+            exit 1
+        fi
         
         # 提示用户按 Enter 键继续
-        print_input "按 Enter 键继续..."
+        print_input "授权完成后按 Enter 键继续..."
         read -r
     else
         print_error "cloudflared 未安装，请检查安装步骤。"
+        exit 1
     fi
 }
 
