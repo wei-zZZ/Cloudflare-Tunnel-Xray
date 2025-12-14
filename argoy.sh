@@ -99,7 +99,7 @@ install_components() {
 }
 
 # ----------------------------
-# 配置 Cloudflare Tunnel 授权
+# Cloudflare 授权
 # ----------------------------
 direct_cloudflare_auth() {
     echo ""
@@ -121,7 +121,7 @@ direct_cloudflare_auth() {
         
         if [ -n "$AUTH_URL" ]; then
             print_info "授权链接已生成：$AUTH_URL"
-            print_info "请在浏览器中打开该链接进行授权。"
+            print_info "请在浏览器中打开该链接进行授权，完成后按 Enter 键继续。"
         else
             print_error "未能获取到授权链接，请检查您的环境配置。"
             exit 1
@@ -135,6 +135,7 @@ direct_cloudflare_auth() {
         exit 1
     fi
 }
+
 
 # ----------------------------
 # 配置 Xray
