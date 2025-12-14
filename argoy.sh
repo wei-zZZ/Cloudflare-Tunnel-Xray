@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
-# Cloudflare Tunnel + Xray 安全增强部署脚本
-# 修复版本 - 确保无BOM和格式问题
+# Argox Tunnel + Xray 安装脚本
+# 版本: 6.1 - 修复版
 # ============================================
 
 set -e
@@ -20,108 +20,163 @@ print_info() { echo -e "${BLUE}[*]${NC} $1"; }
 print_success() { echo -e "${GREEN}[+]${NC} $1"; }
 print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
 print_error() { echo -e "${RED}[-]${NC} $1"; }
-
-# 清理可能存在的BOM
-LC_ALL=C
-export LC_ALL
+print_input() { echo -e "${CYAN}[?]${NC} $1"; }
+print_auth() { echo -e "${GREEN}[🔐]${NC} $1"; }
 
 # ----------------------------
-# 检查并修复原始脚本
+# 配置变量
 # ----------------------------
-check_and_fix_script() {
-    local script_file="$1"
-    
-    # 检查文件编码
-    if file "$script_file" | grep -q "with BOM"; then
-        print_warning "检测到BOM头，正在清理..."
-        sed -i '1s/^\xEF\xBB\xBF//' "$script_file"
-    fi
-    
-    # 移除Windows换行符
-    if grep -q $'\r' "$script_file"; then
-        print_warning "检测到Windows换行符，正在转换..."
-        sed -i 's/\r//g' "$script_file"
-    fi
-    
-    # 检查脚本语法
-    if ! bash -n "$script_file"; then
-        print_error "脚本语法错误"
-        exit 1
-    fi
-    
-    print_success "脚本检查通过"
+CONFIG_DIR="/etc/argox"
+DATA_DIR="/var/lib/argox"
+LOG_DIR="/var/log/argox"
+BIN_DIR="/usr/local/bin"
+SERVICE_USER="argox"
+SERVICE_GROUP="argox"
+
+USER_DOMAIN=""
+TUNNEL_NAME="argox-tunnel"
+SILENT_MODE=false
+
+# ----------------------------
+# 显示标题
+# ----------------------------
+show_title() {
+    clear
+    echo ""
+    echo "╔══════════════════════════════════════════════╗"
+    echo "║     Argox Tunnel + Xray 管理脚本             ║"
+    echo "║             版本: 6.1 - 修复版               ║"
+    echo "╚══════════════════════════════════════════════╝"
+    echo ""
 }
 
 # ----------------------------
-# 主安装流程
+# 修复软件源问题
 # ----------------------------
-main_install() {
-    print_info "开始安全隧道安装流程..."
+fix_apt_sources() {
+    print_info "检查软件源配置..."
     
-    # 检查系统
-    check_system
+    cp /etc/apt/sources.list /etc/apt/sources.list.backup 2>/dev/null || true
     
-    # 创建目录结构
-    create_directories
+    if grep -q "debian" /etc/os-release; then
+        print_info "检测到 Debian 系统，修复软件源..."
+        cat > /etc/apt/sources.list << EOF
+deb http://deb.debian.org/debian bullseye main contrib non-free
+deb http://deb.debian.org/debian bullseye-updates main contrib non-free
+deb http://security.debian.org/debian-security bullseye-security main contrib non-free
+EOF
+    elif grep -q "ubuntu" /etc/os-release; then
+        print_info "检测到 Ubuntu 系统，修复软件源..."
+        cat > /etc/apt/sources.list << EOF
+deb http://archive.ubuntu.com/ubuntu focal main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu focal-updates main restricted universe multiverse
+deb http://security.ubuntu.com/ubuntu focal-security main restricted universe multiverse
+EOF
+    fi
     
-    # 下载组件
-    download_components
-    
-    # 配置服务
-    configure_services
-    
-    # 启动服务
-    start_services
-    
-    print_success "安装完成！"
+    rm -f /etc/apt/sources.list.d/*bullseye-backports* 2>/dev/null || true
+    apt-get update -y || {
+        print_warning "软件源更新失败，尝试继续安装..."
+    }
 }
 
+# ----------------------------
+# 收集用户信息
+# ----------------------------
+collect_user_info() {
+    echo ""
+    print_info "═══════════════════════════════════════════════"
+    print_info "           配置 Argox Tunnel"
+    print_info "═══════════════════════════════════════════════"
+    echo ""
+    
+    if [ "$SILENT_MODE" = true ]; then
+        USER_DOMAIN="tunnel.example.com"
+        print_info "静默模式：使用默认域名 $USER_DOMAIN"
+        print_info "隧道名称: $TUNNEL_NAME"
+        return
+    fi
+    
+    while [[ -z "$USER_DOMAIN" ]]; do
+        print_input "请输入您的域名 (例如: tunnel.yourdomain.com):"
+        read -r USER_DOMAIN
+        
+        if [[ -z "$USER_DOMAIN" ]]; then
+            print_error "域名不能为空！"
+        elif ! [[ "$USER_DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9\.-]+\.[a-zA-Z]{2,}$ ]]; then
+            print_error "域名格式不正确，请重新输入！"
+            USER_DOMAIN=""
+        fi
+    done
+    
+    print_input "请输入隧道名称 [默认: argox-tunnel]:"
+    read -r TUNNEL_NAME
+    TUNNEL_NAME=${TUNNEL_NAME:-"argox-tunnel"}
+    
+    echo ""
+    print_success "配置已保存:"
+    echo "  域名: $USER_DOMAIN"
+    echo "  隧道名称: $TUNNEL_NAME"
+    echo ""
+}
+
+# ----------------------------
+# 系统检查（修复版）
+# ----------------------------
 check_system() {
     print_info "检查系统环境..."
     
-    # 检查root权限
     if [[ $EUID -ne 0 ]]; then
         print_error "请使用root权限运行此脚本"
         exit 1
     fi
     
-    # 检查必要工具
-    local required_tools=("curl" "unzip" "jq" "systemctl")
-    for tool in "${required_tools[@]}"; do
+    fix_apt_sources
+    
+    print_info "安装必要工具..."
+    
+    local tools=("curl" "wget" "unzip")
+    for tool in "${tools[@]}"; do
         if ! command -v "$tool" &> /dev/null; then
-            print_info "安装 $tool..."
-            apt-get update && apt-get install -y "$tool" || {
-                print_error "无法安装 $tool"
-                exit 1
-            }
+            print_info "正在安装 $tool..."
+            
+            if apt-get install -y -qq "$tool" 2>/dev/null; then
+                print_success "$tool 安装成功"
+            else
+                print_warning "apt安装 $tool 失败，尝试其他方法..."
+                
+                case "$tool" in
+                    "curl")
+                        apt-get install -y libcurl4-openssl-dev || true
+                        ;;
+                    "wget")
+                        wget_direct_install || true
+                        ;;
+                    "unzip")
+                        unzip_direct_install || true
+                        ;;
+                esac
+                
+                if ! command -v "$tool" &> /dev/null; then
+                    print_error "无法安装 $tool，安装可能不完整"
+                else
+                    print_success "$tool 安装完成"
+                fi
+            fi
+        else
+            print_info "$tool 已安装"
         fi
     done
     
     print_success "系统检查完成"
 }
 
-create_directories() {
-    print_info "创建目录结构..."
+# ----------------------------
+# 安装组件（改进版）
+# ----------------------------
+install_components() {
+    print_info "安装必要组件..."
     
-    local dirs=(
-        "/etc/secure_tunnel"
-        "/var/lib/secure_tunnel"
-        "/var/log/secure_tunnel"
-        "/usr/local/bin"
-    )
-    
-    for dir in "${dirs[@]}"; do
-        mkdir -p "$dir"
-        chmod 755 "$dir"
-    done
-    
-    print_success "目录创建完成"
-}
-
-download_components() {
-    print_info "下载必要组件..."
-    
-    # 获取系统架构
     local arch
     arch=$(uname -m)
     
@@ -140,190 +195,105 @@ download_components() {
             ;;
     esac
     
-    # 下载Xray
     print_info "下载 Xray..."
-    if ! curl -L --progress-bar "$xray_url" -o /tmp/xray.zip; then
-        print_error "Xray下载失败"
-        exit 1
-    fi
-    
-    # 下载cloudflared
-    print_info "下载 cloudflared..."
-    if ! curl -L --progress-bar "$cf_url" -o /tmp/cloudflared; then
-        print_error "cloudflared下载失败"
-        exit 1
-    fi
-    
-    # 解压和安装
-    unzip -q -d /tmp /tmp/xray.zip
-    mv /tmp/xray /usr/local/bin/
-    mv /tmp/cloudflared /usr/local/bin/
-    
-    chmod +x /usr/local/bin/xray /usr/local/bin/cloudflared
-    
-    # 清理临时文件
-    rm -f /tmp/xray.zip
-    
-    print_success "组件下载完成"
-}
-
-configure_services() {
-    print_info "配置系统服务..."
-    
-    # 生成配置
-    local uuid
-    uuid=$(cat /proc/sys/kernel/random/uuid)
-    local port=$((20000 + RANDOM % 10000))
-    
-    # Xray配置
-    cat > /etc/secure_tunnel/xray.json << EOF
-{
-    "log": {
-        "loglevel": "warning",
-        "access": "/var/log/secure_tunnel/xray-access.log",
-        "error": "/var/log/secure_tunnel/xray-error.log"
-    },
-    "inbounds": [{
-        "port": $port,
-        "listen": "127.0.0.1",
-        "protocol": "vless",
-        "settings": {
-            "clients": [{
-                "id": "$uuid",
-                "flow": ""
-            }],
-            "decryption": "none"
-        },
-        "streamSettings": {
-            "network": "ws",
-            "security": "none",
-            "wsSettings": {
-                "path": "/$uuid"
-            }
-        }
-    }],
-    "outbounds": [{
-        "protocol": "freedom",
-        "settings": {}
-    }]
-}
-EOF
-    
-    # Xray服务文件
-    cat > /etc/systemd/system/secure-tunnel-xray.service << EOF
-[Unit]
-Description=Secure Tunnel Xray Service
-After=network.target
-
-[Service]
-Type=simple
-User=root
-Group=root
-ExecStart=/usr/local/bin/xray run -config /etc/secure_tunnel/xray.json
-Restart=on-failure
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    
-    # cloudflared服务文件（简化版，需要后续配置）
-    cat > /etc/systemd/system/secure-tunnel-argo.service << EOF
-[Unit]
-Description=Secure Tunnel Argo Service
-After=network.target
-
-[Service]
-Type=simple
-User=root
-Group=root
-ExecStart=/usr/local/bin/cloudflared tunnel run
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    
-    # 保存连接信息
-    cat > /etc/secure_tunnel/client-info.txt << EOF
-# ============================================
-# 安全隧道连接信息
-# ============================================
-
-协议: vless
-UUID: $uuid
-端口: 443 (TLS) / 80 (非TLS)
-路径: /$uuid
-
-注意: 需要配置Cloudflare Tunnel并绑定域名
-EOF
-    
-    print_success "服务配置完成"
-}
-
-start_services() {
-    print_info "启动服务..."
-    
-    systemctl daemon-reload
-    
-    # 启动Xray
-    if systemctl start secure-tunnel-xray.service; then
-        systemctl enable secure-tunnel-xray.service
-        print_success "Xray服务启动成功"
+    if curl -L -o /tmp/xray.zip "$xray_url"; then
+        if unzip -q -o /tmp/xray.zip -d /tmp/; then
+            local xray_binary=$(find /tmp -name "xray" -type f | head -1)
+            if [[ -n "$xray_binary" ]] && [[ -f "$xray_binary" ]]; then
+                mv "$xray_binary" "$BIN_DIR/xray"
+                chmod +x "$BIN_DIR/xray"
+                print_success "Xray 安装成功"
+            else
+                print_error "Xray 解压后未找到二进制文件"
+                exit 1
+            fi
+        else
+            print_error "Xray 解压失败"
+            exit 1
+        fi
     else
-        print_error "Xray服务启动失败"
-        journalctl -u secure-tunnel-xray.service -n 10 --no-pager
+        print_error "Xray 下载失败"
+        exit 1
     fi
     
-    print_info ""
-    print_info "下一步操作:"
-    print_info "1. 配置Cloudflare Tunnel:"
-    print_info "   cloudflared tunnel login"
-    print_info "   cloudflared tunnel create secure-tunnel"
-    print_info "   cloudflared tunnel route dns secure-tunnel 你的域名"
-    print_info ""
-    print_info "2. 查看连接信息:"
-    print_info "   cat /etc/secure_tunnel/client-info.txt"
+    print_info "下载 cloudflared..."
+    if curl -L -o /tmp/cloudflared "$cf_url"; then
+        mv /tmp/cloudflared "$BIN_DIR/cloudflared"
+        chmod +x "$BIN_DIR/cloudflared"
+        print_success "cloudflared 安装成功"
+    else
+        print_error "cloudflared 下载失败"
+        exit 1
+    fi
+    
+    rm -rf /tmp/xray* /tmp/cloudflare* 2>/dev/null
+    
+    print_success "所有组件安装完成"
 }
 
 # ----------------------------
-# 主函数
+# Cloudflare 授权
+# ----------------------------
+direct_cloudflare_auth() {
+    echo ""
+    print_info "请进行 Cloudflare Tunnel 授权..."
+    print_info "执行以下命令获取凭证："
+    echo "cloudflared tunnel login"
+    echo ""
+    print_input "按 Enter 键继续..."
+    read
+}
+
+# ----------------------------
+# Xray 配置
+# ----------------------------
+configure_xray() {
+    print_info "配置 Xray..."
+
+    local uuid=$(cat /proc/sys/kernel/random/uuid)
+    local port=10000
+
+    mkdir -p "$CONFIG_DIR"
+
+    # 创建 Xray 配置文件
+    cat > "$CONFIG_DIR/xray.json" <<EOF
+{
+  "log": {"loglevel": "warning"},
+  "inbounds": [{
+    "port": $port,
+    "listen": "127.0.0.1",
+    "protocol": "vless",
+    "settings": {
+      "clients": [{"id": "$uuid", "level": 0}],
+      "decryption": "none"
+    },
+    "streamSettings": {
+      "network": "ws",
+      "security": "none",
+      "wsSettings": {"path": "/$uuid"}
+    }
+  }],
+  "outbounds": [{"protocol": "freedom", "tag": "direct"}]
+}
+EOF
+
+    print_success "Xray 配置完成"
+}
+
+# ----------------------------
+# 主要功能执行
 # ----------------------------
 main() {
-    clear
-    echo ""
-    echo "╔══════════════════════════════════════╗"
-    echo "║    安全隧道快速安装脚本              ║"
-    echo "╚══════════════════════════════════════╝"
-    echo ""
-    
-    case "${1:-}" in
-        "install")
-            main_install
-            ;;
-        "status")
-            systemctl status secure-tunnel-xray.service --no-pager
-            ;;
-        "uninstall")
-            print_warning "卸载服务..."
-            systemctl stop secure-tunnel-xray.service 2>/dev/null || true
-            systemctl stop secure-tunnel-argo.service 2>/dev/null || true
-            systemctl disable secure-tunnel-xray.service 2>/dev/null || true
-            systemctl disable secure-tunnel-argo.service 2>/dev/null || true
-            rm -f /etc/systemd/system/secure-tunnel-*.service
-            rm -rf /etc/secure_tunnel /var/lib/secure_tunnel /var/log/secure_tunnel
-            print_success "卸载完成"
-            ;;
-        *)
-            echo "使用方法:"
-            echo "  sudo $0 install     # 安装服务"
-            echo "  sudo $0 status      # 查看状态"
-            echo "  sudo $0 uninstall   # 卸载服务"
-            exit 1
-            ;;
-    esac
+    show_title
+    check_system
+    collect_user_info
+    install_components
+    configure_xray
+    direct_cloudflare_auth
+    print_success "安装和配置完成"
 }
 
-# 运行主函数
-main "$@"
+# ----------------------------
+# 执行脚本
+# ----------------------------
+main
