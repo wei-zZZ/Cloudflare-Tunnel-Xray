@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
-# Argox Tunnel + Xray 安装脚本
-# 版本: 6.1 - 修复版
+# Argox Tunnel + Xray 安装及管理脚本
+# 版本: 1.0
 # ============================================
 
 set -e
@@ -45,113 +45,61 @@ show_title() {
     echo ""
     echo "╔══════════════════════════════════════════════╗"
     echo "║     Argox Tunnel + Xray 管理脚本             ║"
-    echo "║             版本: 6.1 - 修复版               ║"
+    echo "║               版本: 1.0                      ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
 }
 
 # ----------------------------
-# 收集用户信息
-# ----------------------------
-collect_user_info() {
-    echo ""
-    print_info "═══════════════════════════════════════════════"
-    print_info "           配置 Argox Tunnel"
-    print_info "═══════════════════════════════════════════════"
-    echo ""
-    
-    if [ "$SILENT_MODE" = true ]; then
-        USER_DOMAIN="tunnel.example.com"
-        print_info "静默模式：使用默认域名 $USER_DOMAIN"
-        print_info "隧道名称: $TUNNEL_NAME"
-        return
-    fi
-    
-    while [[ -z "$USER_DOMAIN" ]]; do
-        print_input "请输入您的域名 (例如: tunnel.yourdomain.com):"
-        read -r USER_DOMAIN
-        
-        if [[ -z "$USER_DOMAIN" ]]; then
-            print_error "域名不能为空！"
-        elif ! [[ "$USER_DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9\.-]+\.[a-zA-Z]{2,}$ ]]; then
-            print_error "域名格式不正确，请重新输入！"
-            USER_DOMAIN=""
-        fi
-    done
-    
-    print_input "请输入隧道名称 [默认: argox-tunnel]:" 
-    read -r TUNNEL_NAME
-    TUNNEL_NAME=${TUNNEL_NAME:-"argox-tunnel"}
-    
-    echo ""
-    print_success "配置已保存:"
-    echo "  域名: $USER_DOMAIN"
-    echo "  隧道名称: $TUNNEL_NAME"
-    echo ""
-}
-
-# ----------------------------
-# 安装组件（改进版）
+# 安装组件（Cloudflared 和 Xray）
 # ----------------------------
 install_components() {
     print_info "安装必要组件..."
     
-    local arch
-    arch=$(uname -m)
-    
-    case "$arch" in
-        x86_64|amd64)
-            local xray_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
-            local cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
-            ;;
-        aarch64|arm64)
-            local xray_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip"
-            local cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
-            ;;
-        *)
-            print_error "不支持的架构: $arch"
-            exit 1
-            ;;
-    esac
-    
-    print_info "下载 Xray..."
-    if curl -L -o /tmp/xray.zip "$xray_url"; then
-        if unzip -q -o /tmp/xray.zip -d /tmp/; then
-            local xray_binary=$(find /tmp -name "xray" -type f | head -1)
-            if [[ -n "$xray_binary" ]] && [[ -f "$xray_binary" ]]; then
-                mv "$xray_binary" "$BIN_DIR/xray"
-                chmod +x "$BIN_DIR/xray"
-                print_success "Xray 安装成功"
-            else
-                print_error "Xray 解压后未找到二进制文件"
-                exit 1
-            fi
-        else
-            print_error "Xray 解压失败"
-            exit 1
+    # 安装 curl 和 unzip
+    local tools=("curl" "unzip")
+    for tool in "${tools[@]}"; do
+        if ! command -v "$tool" &> /dev/null; then
+            print_info "正在安装 $tool..."
+            apt-get install -y "$tool" || { print_error "$tool 安装失败"; exit 1; }
+            print_success "$tool 安装完成"
         fi
+    done
+    
+    # 检测系统架构
+    local arch=$(uname -m)
+    if [[ "$arch" == "x86_64" || "$arch" == "amd64" ]]; then
+        local cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+        local xray_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+    elif [[ "$arch" == "aarch64" || "$arch" == "arm64" ]]; then
+        local cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+        local xray_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip"
     else
-        print_error "Xray 下载失败"
+        print_error "不支持的架构: $arch"
         exit 1
     fi
     
+    # 下载并安装 cloudflared
     print_info "下载 cloudflared..."
-    if curl -L -o /tmp/cloudflared "$cf_url"; then
-        mv /tmp/cloudflared "$BIN_DIR/cloudflared"
-        chmod +x "$BIN_DIR/cloudflared"
-        print_success "cloudflared 安装成功"
-    else
-        print_error "cloudflared 下载失败"
-        exit 1
-    fi
+    curl -L -o /tmp/cloudflared "$cf_url"
+    mv /tmp/cloudflared "$BIN_DIR/cloudflared"
+    chmod +x "$BIN_DIR/cloudflared"
+    print_success "cloudflared 安装成功"
+
+    # 下载并安装 Xray
+    print_info "下载 Xray..."
+    curl -L -o /tmp/xray.zip "$xray_url"
+    unzip -q -o /tmp/xray.zip -d /tmp/
+    mv /tmp/xray "$BIN_DIR/xray"
+    chmod +x "$BIN_DIR/xray"
+    print_success "Xray 安装成功"
     
-    rm -rf /tmp/xray* /tmp/cloudflare* 2>/dev/null
-    
+    rm -rf /tmp/xray* /tmp/cloudflared* 2>/dev/null
     print_success "所有组件安装完成"
 }
 
 # ----------------------------
-# Cloudflare 授权
+# 配置 Cloudflare Tunnel 授权
 # ----------------------------
 direct_cloudflare_auth() {
     echo ""
@@ -161,16 +109,15 @@ direct_cloudflare_auth() {
     echo ""
     print_input "按 Enter 键继续..."
     read -r
-    
-    # 检查 cloudflared 是否安装并提供授权命令
+
+    # 执行 cloudflared tunnel login
     if command -v cloudflared &>/dev/null; then
         print_success "cloudflared 已安装，您可以运行 'cloudflared tunnel login' 来完成授权。"
         
-        # 直接运行 cloudflared tunnel login，并捕获输出
+        # 执行 cloudflared tunnel login 并捕获输出中的授权链接
         print_info "开始获取授权链接，请稍等..."
         
-        # 执行 cloudflared tunnel login 并捕获输出中的授权链接
-        AUTH_URL=$(cloudflared tunnel login 2>&1 | grep -o 'https://.*cloudflare.com.*' | head -n 1)
+        AUTH_URL=$(cloudflared tunnel login 2>&1 | grep -o 'https://dash.cloudflare.com/.*' | head -n 1)
         
         if [ -n "$AUTH_URL" ]; then
             print_info "授权链接已生成：$AUTH_URL"
@@ -190,55 +137,98 @@ direct_cloudflare_auth() {
 }
 
 # ----------------------------
-# 配置 Cloudflare Tunnel
+# 配置 Xray
 # ----------------------------
-configure_cloudflare_tunnel() {
-    print_info "创建并启动 Cloudflare Tunnel..."
-
-    # 创建 Cloudflare Tunnel
-    cloudflared tunnel create "$TUNNEL_NAME"
-
-    # 创建 config.yml 配置文件
-    cat > /etc/cloudflared/config.yml <<EOF
-tunnel: $(cat ~/.cloudflared/${TUNNEL_NAME}.json | jq -r '.TunnelID')  # 使用 tunnel 的 ID
-credentials-file: /root/.cloudflared/${TUNNEL_NAME}.json  # 使用凭证文件路径
-
-ingress:
-  - hostname: $USER_DOMAIN  # 使用用户提供的域名
-    service: http://127.0.0.1:10000  # Xray 监听端口
-  - service: http_status:404  # 其他流量返回 404
+configure_xray() {
+    print_info "配置 Xray..."
+    mkdir -p "$CONFIG_DIR"
+    
+    local uuid=$(cat /proc/sys/kernel/random/uuid)
+    local port=10000
+    
+    # 创建 Xray 配置文件
+    cat > "$CONFIG_DIR/xray.json" <<EOF
+{
+  "log": {"loglevel": "warning"},
+  "inbounds": [{
+    "port": $port,
+    "listen": "127.0.0.1",
+    "protocol": "vless",
+    "settings": {
+      "clients": [{"id": "$uuid", "level": 0}],
+      "decryption": "none"
+    },
+    "streamSettings": {
+      "network": "ws",
+      "security": "none",
+      "wsSettings": {"path": "/$uuid"}
+    }
+  }],
+  "outbounds": [{"protocol": "freedom", "tag": "direct"}]
+}
 EOF
-
-    print_success "Cloudflare Tunnel 配置完成"
+    print_success "Xray 配置完成"
 }
 
 # ----------------------------
-# 启动 Xray 和 Cloudflare Tunnel
+# 启动服务
 # ----------------------------
 start_services() {
     print_info "启动 Xray 服务..."
-    sudo systemctl start xray
-    sudo systemctl enable xray
+    systemctl start xray
+    systemctl enable xray
     print_success "Xray 服务已启动"
 
     print_info "启动 Cloudflare Tunnel..."
-    sudo cloudflared tunnel run "$TUNNEL_NAME"
+    cloudflared tunnel run "$TUNNEL_NAME"
     print_success "Cloudflare Tunnel 已启动"
 }
 
 # ----------------------------
-# 主要功能执行
+# 卸载功能
+# ----------------------------
+uninstall() {
+    print_info "卸载 Argox Tunnel 和 Xray..."
+    
+    # 停止服务
+    systemctl stop xray
+    systemctl disable xray
+    print_success "Xray 服务已停止"
+    
+    # 删除文件
+    rm -rf "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
+    rm -f "$BIN_DIR/xray" "$BIN_DIR/cloudflared"
+    print_success "组件已删除"
+    
+    print_success "卸载完成"
+}
+
+# ----------------------------
+# 主功能执行
 # ----------------------------
 main() {
     show_title
-    collect_user_info
-    install_components
-    direct_cloudflare_auth
-    configure_cloudflare_tunnel
-    start_services
-    print_success "安装和配置完成，服务已启动"
+    print_input "请选择操作：1. 安装 2. 卸载"
+    read -r option
+    
+    case "$option" in
+        1)
+            install_components
+            direct_cloudflare_auth
+            configure_xray
+            start_services
+            print_success "安装和配置完成，服务已启动"
+            ;;
+        2)
+            uninstall
+            ;;
+        *)
+            print_error "无效选择，请选择 1 或 2"
+            ;;
+    esac
 }
 
 # ----------------------------
 # 执行脚本
 # ----------------------------
+main
