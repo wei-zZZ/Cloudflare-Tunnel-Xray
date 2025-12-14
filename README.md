@@ -47,14 +47,14 @@ curl -sSL -o argow.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunne
 
 1. 下载脚本
 ```
-curl -sSL -o secure_tunnel.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/argox.sh
+curl -sSL -o argow.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/argox.sh
 ```
 ```
-chmod +x secure_tunnel.sh
+chmod +x argow.sh
 ```
 2. 运行脚本
 ```
-sudo ./secure_tunnel.sh
+sudo ./argow.sh
 ```
 3. 选择安装选项
 脚本提供交互式菜单，选择 1) 安装 Secure Tunnel 开始安装。
@@ -133,32 +133,32 @@ secure-tunnel-argo.service - Argo Tunnel 服务
 命令行参数
 ```
 # 显示菜单（默认）
-sudo ./secure_tunnel.sh
+sudo ./argow.sh
 
 # 直接安装
-sudo ./secure_tunnel.sh install
+sudo ./argow.sh install
 
 # 静默安装（使用默认值）
-sudo ./secure_tunnel.sh -y
-sudo ./secure_tunnel.sh --silent
+sudo ./argow.sh -y
+sudo ./argow.sh --silent
 
 # 查看状态
-sudo ./secure_tunnel.sh status
+sudo ./argow.sh status
 
 # 查看配置
-sudo ./secure_tunnel.sh config
+sudo ./argow.sh config
 
 # 修复授权问题
-sudo ./secure_tunnel.sh fix-auth
+sudo ./argow.sh fix-auth
 
 # 卸载
-sudo ./secure_tunnel.sh uninstall
+sudo ./argow.sh uninstall
 ```
 静默安装模式
 对于自动化部署，可以使用静默安装：
 
 ```
-sudo ./secure_tunnel.sh -y
+sudo ./argow.sh -y
 ```
 静默模式将使用默认值：
 
@@ -251,7 +251,7 @@ bash
 
 ```
 # 运行修复工具
-sudo ./secure_tunnel.sh fix-auth
+sudo ./argow.sh fix-auth
 
 # 或手动步骤
 rm -rf /root/.cloudflared
@@ -299,7 +299,7 @@ text
 ```
 卸载
 ```
-sudo ./secure_tunnel.sh uninstall
+sudo ./argow.sh uninstall
 ```
 会删除：
 
@@ -367,14 +367,14 @@ sudo ./secure_tunnel.sh install
 
 # 重新下载最新脚本
 ```
-curl -sSL -o secure_tunnel.sh https://github.com/wei-zZZ/Cloudflare-Tunnel-Xray/blob/main/argox.sh
+curl -sSL -o argow.sh https://github.com/wei-zZZ/Cloudflare-Tunnel-Xray/blob/main/argox.sh
 ```
 ```
-chmod +x secure_tunnel.sh
+chmod +x argow.sh
 ```
 # 重新安装（配置会保留）
 ```
-sudo ./secure_tunnel.sh install
+sudo ./argow.sh install
 ```
 技术支持
 GitHub: wei-zZZ/Cloudflare-Tunnel-Xray
