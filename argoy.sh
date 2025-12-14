@@ -109,7 +109,7 @@ collect_user_info() {
         fi
     done
     
-    print_input "请输入隧道名称 [默认: argox-tunnel]:"
+    print_input "请输入隧道名称 [默认: argox-tunnel]:" 
     read -r TUNNEL_NAME
     TUNNEL_NAME=${TUNNEL_NAME:-"argox-tunnel"}
     
@@ -241,7 +241,15 @@ direct_cloudflare_auth() {
     echo "cloudflared tunnel login"
     echo ""
     print_input "按 Enter 键继续..."
-    read
+    read -r
+    
+    # 检查 cloudflared 是否安装并提供授权命令
+    if command -v cloudflared &>/dev/null; then
+        print_success "cloudflared 已安装，您可以运行 'cloudflared tunnel login' 来完成授权。"
+        print_info "在终端中运行 'cloudflared tunnel login' 并获取授权链接。"
+    else
+        print_error "cloudflared 未安装，请检查安装步骤。"
+    fi
 }
 
 # ----------------------------
@@ -281,16 +289,74 @@ EOF
 }
 
 # ----------------------------
+# 卸载组件
+# ----------------------------
+uninstall_components() {
+    print_info "正在卸载组件..."
+
+    # 移除 Xray 和 cloudflared 二进制文件
+    if [ -f "$BIN_DIR/xray" ]; then
+        rm -f "$BIN_DIR/xray"
+        print_success "Xray 已卸载"
+    else
+        print_warning "未找到 Xray，可能未安装"
+    fi
+
+    if [ -f "$BIN_DIR/cloudflared" ]; then
+        rm -f "$BIN_DIR/cloudflared"
+        print_success "cloudflared 已卸载"
+    else
+        print_warning "未找到 cloudflared，可能未安装"
+    fi
+
+    # 删除配置文件和目录
+    rm -rf "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
+    print_success "配置文件已删除"
+
+    # 删除服务用户和组
+    if id "$SERVICE_USER" &>/dev/null; then
+        userdel -r "$SERVICE_USER"
+        print_success "服务用户 $SERVICE_USER 已删除"
+    else
+        print_warning "未找到服务用户 $SERVICE_USER"
+    fi
+
+    if getent group "$SERVICE_GROUP" &>/dev/null; then
+        groupdel "$SERVICE_GROUP"
+        print_success "服务组 $SERVICE_GROUP 已删除"
+    else
+        print_warning "未找到服务组 $SERVICE_GROUP"
+    fi
+
+    print_success "卸载完成"
+}
+
+# ----------------------------
 # 主要功能执行
 # ----------------------------
 main() {
     show_title
-    check_system
-    collect_user_info
-    install_components
-    configure_xray
-    direct_cloudflare_auth
-    print_success "安装和配置完成"
+
+    print_input "请选择操作: [1] 安装 [2] 卸载"
+    read -r action
+
+    case $action in
+        1)
+            check_system
+            collect_user_info
+            install_components
+            configure_xray
+            direct_cloudflare_auth
+            print_success "安装和配置完成"
+            ;;
+        2)
+            uninstall_components
+            ;;
+        *)
+            print_error "无效选项"
+            exit 1
+            ;;
+    esac
 }
 
 # ----------------------------
