@@ -166,10 +166,10 @@ direct_cloudflare_auth() {
     if command -v cloudflared &>/dev/null; then
         print_success "cloudflared 已安装，您可以运行 'cloudflared tunnel login' 来完成授权。"
         
-        # 获取并显示授权链接
+        # 直接运行 cloudflared tunnel login，并捕获输出
         print_info "开始获取授权链接，请稍等..."
         
-        # 捕获 cloudflared tunnel login 输出，并提取授权链接
+        # 执行 cloudflared tunnel login 并捕获输出中的授权链接
         AUTH_URL=$(cloudflared tunnel login 2>&1 | grep -o 'https://.*cloudflare.com.*' | head -n 1)
         
         if [ -n "$AUTH_URL" ]; then
@@ -242,4 +242,3 @@ main() {
 # ----------------------------
 # 执行脚本
 # ----------------------------
-main
