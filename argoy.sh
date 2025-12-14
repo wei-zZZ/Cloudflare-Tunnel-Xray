@@ -166,7 +166,12 @@ direct_cloudflare_auth() {
     if command -v cloudflared &>/dev/null; then
         print_success "cloudflared 已安装，您可以运行 'cloudflared tunnel login' 来完成授权。"
         print_info "请在浏览器中打开以下链接，完成授权后按 Enter 键继续："
+        
+        # 获取授权链接并提示用户
         cloudflared tunnel login
+        print_info "在终端中执行 'cloudflared tunnel login'，并在浏览器中完成授权。"
+        
+        # 等待用户按键继续
         print_input "按 Enter 键继续..."
         read -r
     else
