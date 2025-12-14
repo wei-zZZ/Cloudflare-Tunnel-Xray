@@ -103,38 +103,62 @@ install_components() {
 # ----------------------------
 direct_cloudflare_auth() {
     echo ""
-    print_info "请进行 Cloudflare Tunnel 授权..."
-    print_info "执行以下命令获取凭证："
-    echo "cloudflared tunnel login"
+    print_auth "═══════════════════════════════════════════════"
+    print_auth "         Cloudflare 授权                      "
+    print_auth "═══════════════════════════════════════════════"
     echo ""
-    print_input "按 Enter 键继续..."
+    
+    # 清理旧的授权文件
+    rm -rf /root/.cloudflared 2>/dev/null
+    mkdir -p /root/.cloudflared
+    
+    echo "请按以下步骤操作："
+    echo "1. 脚本将显示一个 Cloudflare 授权链接"
+    echo "2. 复制链接到浏览器打开"
+    echo "3. 登录您的 Cloudflare 账户"
+    echo "4. 选择您要使用的域名并授权"
+    echo "5. 返回终端按回车继续"
+    echo ""
+    print_input "按回车开始授权..."
     read -r
-
-    # 执行 cloudflared tunnel login
-    if command -v cloudflared &>/dev/null; then
-        print_success "cloudflared 已安装，您可以运行 'cloudflared tunnel login' 来完成授权。"
-        
-        # 执行 cloudflared tunnel login 并捕获输出中的授权链接
-        print_info "开始获取授权链接，请稍等..."
-        
-        AUTH_URL=$(cloudflared tunnel login 2>&1 | grep -o 'https://dash.cloudflare.com/.*' | head -n 1)
-        
-        if [ -n "$AUTH_URL" ]; then
-            print_info "授权链接已生成：$AUTH_URL"
-            print_info "请在浏览器中打开该链接进行授权，完成后按 Enter 键继续。"
-        else
-            print_error "未能获取到授权链接，请检查您的环境配置。"
-            exit 1
+    
+    echo ""
+    echo "=============================================="
+    echo "请复制以下链接到浏览器："
+    echo ""
+    
+    # 运行授权命令
+    "$BIN_DIR/cloudflared" tunnel login
+    
+    echo ""
+    echo "=============================================="
+    print_input "完成授权后按回车继续..."
+    read -r
+    
+    # 检查授权结果
+    local check_count=0
+    while [[ $check_count -lt 10 ]]; do
+        if [[ -f "/root/.cloudflared/cert.pem" ]]; then
+            print_success "✅ 授权成功！找到证书文件"
+            
+            # 检查凭证文件
+            if ls /root/.cloudflared/*.json 1> /dev/null 2>&1; then
+                local json_file=$(ls /root/.cloudflared/*.json | head -1)
+                print_success "✅ 找到凭证文件: $(basename "$json_file")"
+                return 0
+            else
+                print_warning "⚠️  未找到JSON凭证文件，将在创建隧道时生成"
+                return 0
+            fi
         fi
-        
-        # 提示用户按 Enter 键继续
-        print_input "授权完成后按 Enter 键继续..."
-        read -r
-    else
-        print_error "cloudflared 未安装，请检查安装步骤。"
-        exit 1
-    fi
+        sleep 2
+        ((check_count++))
+    done
+    
+    print_error "❌ 授权失败：未找到证书文件"
+    return 1
 }
+
 
 
 # ----------------------------
