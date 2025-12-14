@@ -38,6 +38,13 @@ Cloudflare 账户
 一台运行 Linux 的服务器
 
 快速开始
+
+
+```
+curl -sSL -o argow.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/argow.sh && chmod +x argow.sh && sudo ./argow.sh
+```
+
+
 1. 下载脚本
 ```
 curl -sSL -o secure_tunnel.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/argox.sh
