@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
 # Cloudflare Tunnel + Xray 安装脚本
-# 版本: 6.1 - 修复版
+# 版本: 6.2 - 支持 VMESS
 # ============================================
 
 set -e
@@ -36,6 +36,7 @@ SERVICE_GROUP="secure_tunnel"
 USER_DOMAIN=""
 TUNNEL_NAME="secure-tunnel"
 SILENT_MODE=false
+PROTOCOL="both"  # 默认同时支持 vless 和 vmess
 
 # ----------------------------
 # 显示标题
@@ -45,7 +46,7 @@ show_title() {
     echo ""
     echo "╔══════════════════════════════════════════════╗"
     echo "║    Cloudflare Tunnel + Xray 管理脚本        ║"
-    echo "║             版本: 6.1 - 修复版              ║"
+    echo "║             版本: 6.2 - 支持 VMESS          ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
 }
@@ -119,9 +120,38 @@ collect_user_info() {
     TUNNEL_NAME=${TUNNEL_NAME:-"secure-tunnel"}
     
     echo ""
+    print_input "选择协议类型:"
+    echo "  1) VLESS 协议 (推荐)"
+    echo "  2) VMESS 协议"
+    echo "  3) 同时支持 VLESS 和 VMESS"
+    echo ""
+    print_input "请输入选项 (1/2/3) [默认: 3]:"
+    read -r protocol_choice
+    
+    case "$protocol_choice" in
+        1)
+            PROTOCOL="vless"
+            print_info "选择: VLESS 协议"
+            ;;
+        2)
+            PROTOCOL="vmess"
+            print_info "选择: VMESS 协议"
+            ;;
+        3|"")
+            PROTOCOL="both"
+            print_info "选择: 同时支持 VLESS 和 VMESS"
+            ;;
+        *)
+            PROTOCOL="both"
+            print_warning "输入错误，使用默认值: 同时支持 VLESS 和 VMESS"
+            ;;
+    esac
+    
+    echo ""
     print_success "配置已保存:"
     echo "  域名: $USER_DOMAIN"
     echo "  隧道名称: $TUNNEL_NAME"
+    echo "  协议: $PROTOCOL"
     echo ""
 }
 
@@ -142,7 +172,7 @@ check_system() {
     # 安装必要工具
     print_info "安装必要工具..."
     
-    local tools=("curl" "wget" "unzip")
+    local tools=("curl" "wget" "unzip" "jq")
     for tool in "${tools[@]}"; do
         if ! command -v "$tool" &> /dev/null; then
             print_info "正在安装 $tool..."
@@ -164,6 +194,9 @@ check_system() {
                     "unzip")
                         unzip_direct_install || true
                         ;;
+                    "jq")
+                        install_jq_directly || true
+                        ;;
                 esac
                 
                 # 再次检查是否安装成功
@@ -179,6 +212,28 @@ check_system() {
     done
     
     print_success "系统检查完成"
+}
+
+# 手动安装jq函数
+install_jq_directly() {
+    print_info "手动下载安装 jq..."
+    local arch=$(uname -m)
+    local jq_url=""
+    
+    case "$arch" in
+        x86_64|amd64)
+            jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64"
+            ;;
+        aarch64|arm64)
+            jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-arm64"
+            ;;
+    esac
+    
+    if [ -n "$jq_url" ]; then
+        curl -L -o /tmp/jq "$jq_url"
+        chmod +x /tmp/jq
+        mv /tmp/jq /usr/local/bin/jq
+    fi
 }
 
 # 手动安装wget函数
@@ -414,6 +469,7 @@ setup_tunnel() {
 TUNNEL_ID=$tunnel_id
 TUNNEL_NAME=$TUNNEL_NAME
 DOMAIN=$USER_DOMAIN
+PROTOCOL=$PROTOCOL
 CERT_PATH=/root/.cloudflared/cert.pem
 CREDENTIALS_FILE=$json_file
 CREATED_DATE=$(date +"%Y-%m-%d")
@@ -428,17 +484,35 @@ EOF
 configure_xray() {
     print_info "配置 Xray..."
     
-    local uuid=$(cat /proc/sys/kernel/random/uuid)
+    local vless_uuid=$(cat /proc/sys/kernel/random/uuid)
+    local vmess_uuid=$(cat /proc/sys/kernel/random/uuid)
     local port=10000
     
     # 保存UUID和端口到配置文件
-    echo "UUID=$uuid" >> "$CONFIG_DIR/tunnel.conf"
+    echo "VLESS_UUID=$vless_uuid" >> "$CONFIG_DIR/tunnel.conf"
+    echo "VMESS_UUID=$vmess_uuid" >> "$CONFIG_DIR/tunnel.conf"
     echo "PORT=$port" >> "$CONFIG_DIR/tunnel.conf"
     
     # 创建必要的目录
     mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     
-    # 创建Xray配置文件
+    # 根据选择的协议创建配置
+    if [[ "$PROTOCOL" == "vless" ]]; then
+        create_vless_config "$vless_uuid" "$port"
+    elif [[ "$PROTOCOL" == "vmess" ]]; then
+        create_vmess_config "$vmess_uuid" "$port"
+    else  # both
+        create_dual_config "$vless_uuid" "$vmess_uuid" "$port"
+    fi
+    
+    print_success "Xray 配置完成"
+}
+
+# 创建 VLESS 配置
+create_vless_config() {
+    local uuid=$1
+    local port=$2
+    
     cat > "$CONFIG_DIR/xray.json" << EOF
 {
     "log": {"loglevel": "warning"},
@@ -459,8 +533,77 @@ configure_xray() {
     "outbounds": [{"protocol": "freedom", "tag": "direct"}]
 }
 EOF
+}
+
+# 创建 VMESS 配置
+create_vmess_config() {
+    local uuid=$1
+    local port=$2
     
-    print_success "Xray 配置完成"
+    cat > "$CONFIG_DIR/xray.json" << EOF
+{
+    "log": {"loglevel": "warning"},
+    "inbounds": [{
+        "port": $port,
+        "listen": "127.0.0.1",
+        "protocol": "vmess",
+        "settings": {
+            "clients": [{"id": "$uuid", "level": 0}]
+        },
+        "streamSettings": {
+            "network": "ws",
+            "security": "none",
+            "wsSettings": {"path": "/$uuid"}
+        }
+    }],
+    "outbounds": [{"protocol": "freedom", "tag": "direct"}]
+}
+EOF
+}
+
+# 创建双协议配置
+create_dual_config() {
+    local vless_uuid=$1
+    local vmess_uuid=$2
+    local port=$3
+    
+    cat > "$CONFIG_DIR/xray.json" << EOF
+{
+    "log": {"loglevel": "warning"},
+    "inbounds": [
+        {
+            "port": $port,
+            "listen": "127.0.0.1",
+            "protocol": "vless",
+            "settings": {
+                "clients": [{"id": "$vless_uuid", "level": 0}],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "ws",
+                "security": "none",
+                "wsSettings": {"path": "/$vless_uuid"}
+            },
+            "tag": "vless-inbound"
+        },
+        {
+            "port": $((port + 1)),
+            "listen": "127.0.0.1",
+            "protocol": "vmess",
+            "settings": {
+                "clients": [{"id": "$vmess_uuid", "level": 0}]
+            },
+            "streamSettings": {
+                "network": "ws",
+                "security": "none",
+                "wsSettings": {"path": "/$vmess_uuid"}
+            },
+            "tag": "vmess-inbound"
+        }
+    ],
+    "outbounds": [{"protocol": "freedom", "tag": "direct"}]
+}
+EOF
 }
 
 # ----------------------------
@@ -482,9 +625,12 @@ configure_services() {
     local json_file=$(grep "^CREDENTIALS_FILE=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     local port=$(grep "^PORT=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local protocol=$(grep "^PROTOCOL=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     
-    # 创建 cloudflared 配置文件
-    cat > "$CONFIG_DIR/config.yaml" << EOF
+    # 根据协议配置不同的ingress规则
+    if [[ "$protocol" == "both" ]]; then
+        # 创建 cloudflared 配置文件（双协议）
+        cat > "$CONFIG_DIR/config.yaml" << EOF
 tunnel: $tunnel_id
 credentials-file: $json_file
 logfile: $LOG_DIR/argo.log
@@ -500,6 +646,25 @@ ingress:
       noHappyEyeballs: true
   - service: http_status:404
 EOF
+    else
+        # 创建 cloudflared 配置文件（单协议）
+        cat > "$CONFIG_DIR/config.yaml" << EOF
+tunnel: $tunnel_id
+credentials-file: $json_file
+logfile: $LOG_DIR/argo.log
+loglevel: info
+ingress:
+  - hostname: $domain
+    service: http://localhost:$port
+    originRequest:
+      noTLSVerify: true
+      httpHostHeader: $domain
+      connectTimeout: 30s
+      tcpKeepAlive: 30s
+      noHappyEyeballs: true
+  - service: http_status:404
+EOF
+    fi
     
     # 创建 Xray 服务文件
     cat > /etc/systemd/system/secure-tunnel-xray.service << EOF
@@ -608,6 +773,37 @@ start_services() {
 }
 
 # ----------------------------
+# 生成 VMESS 链接
+# ----------------------------
+generate_vmess_link() {
+    local uuid=$1
+    local domain=$2
+    
+    local vmess_config=$(cat << EOF
+{
+    "v": "2",
+    "ps": "Cloudflare-Tunnel-VMESS",
+    "add": "$domain",
+    "port": "443",
+    "id": "$uuid",
+    "aid": "0",
+    "scy": "none",
+    "net": "ws",
+    "type": "none",
+    "host": "$domain",
+    "path": "/$uuid",
+    "tls": "tls",
+    "sni": "$domain",
+    "alpn": ""
+}
+EOF
+    )
+    
+    # Base64编码配置
+    echo -n "vmess://$(echo "$vmess_config" | base64 -w 0)"
+}
+
+# ----------------------------
 # 显示连接信息
 # ----------------------------
 show_connection_info() {
@@ -622,25 +818,81 @@ show_connection_info() {
     fi
     
     local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local vless_uuid=$(grep "^VLESS_UUID=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
+    local vmess_uuid=$(grep "^VMESS_UUID=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
+    local protocol=$(grep "^PROTOCOL=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     
-    if [[ -z "$domain" ]] || [[ -z "$uuid" ]]; then
+    if [[ -z "$domain" ]]; then
         print_error "无法读取配置"
         return
     fi
     
     print_success "🔗 域名: $domain"
-    print_success "🔑 UUID: $uuid"
+    print_success "📡 协议: $protocol"
     print_success "🚪 端口: 443 (TLS)"
-    print_success "🛣️  路径: /$uuid"
     echo ""
     
-    local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#Cloudflare-Tunnel"
+    case "$protocol" in
+        "vless")
+            if [[ -n "$vless_uuid" ]]; then
+                print_success "🔑 VLESS UUID: $vless_uuid"
+                print_success "🛣️  VLESS 路径: /$vless_uuid"
+                echo ""
+                
+                local vless_tls="vless://${vless_uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${vless_uuid}&sni=${domain}#Cloudflare-Tunnel-VLESS"
+                
+                echo "📋 VLESS 链接:"
+                echo "$vless_tls"
+            else
+                print_error "未找到 VLESS UUID"
+            fi
+            ;;
+            
+        "vmess")
+            if [[ -n "$vmess_uuid" ]]; then
+                print_success "🔑 VMESS UUID: $vmess_uuid"
+                print_success "🛣️  VMESS 路径: /$vmess_uuid"
+                echo ""
+                
+                local vmess_link=$(generate_vmess_link "$vmess_uuid" "$domain")
+                
+                echo "📋 VMESS 链接:"
+                echo "$vmess_link"
+            else
+                print_error "未找到 VMESS UUID"
+            fi
+            ;;
+            
+        "both")
+            if [[ -n "$vless_uuid" ]]; then
+                echo "═══════════════════════════════════════════════"
+                print_success "🔑 VLESS UUID: $vless_uuid"
+                print_success "🛣️  VLESS 路径: /$vless_uuid"
+                echo ""
+                
+                local vless_tls="vless://${vless_uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${vless_uuid}&sni=${domain}#Cloudflare-Tunnel-VLESS"
+                
+                echo "📋 VLESS 链接:"
+                echo "$vless_tls"
+                echo ""
+            fi
+            
+            if [[ -n "$vmess_uuid" ]]; then
+                echo "═══════════════════════════════════════════════"
+                print_success "🔑 VMESS UUID: $vmess_uuid"
+                print_success "🛣️  VMESS 路径: /$vmess_uuid"
+                echo ""
+                
+                local vmess_link=$(generate_vmess_link "$vmess_uuid" "$domain")
+                
+                echo "📋 VMESS 链接:"
+                echo "$vmess_link"
+                echo ""
+            fi
+            ;;
+    esac
     
-    echo "📋 VLESS 链接:"
-    echo "$vless_tls"
     echo ""
-    
     print_info "🧪 服务状态:"
     echo ""
     
@@ -658,7 +910,7 @@ show_connection_info() {
     
     echo ""
     print_info "📋 使用说明:"
-    echo "  1. 复制上面的VLESS链接到客户端"
+    echo "  1. 复制上面的链接到客户端"
     echo "  2. 如果连接不上，等待2-3分钟再试"
     echo "  3. 查看服务状态: sudo ./secure_tunnel.sh status"
     echo ""
@@ -772,9 +1024,11 @@ show_config() {
     fi
     
     local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
-    local uuid=$(grep "^UUID=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
+    local vless_uuid=$(grep "^VLESS_UUID=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
+    local vmess_uuid=$(grep "^VMESS_UUID=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
+    local protocol=$(grep "^PROTOCOL=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
     
-    if [[ -z "$domain" ]] || [[ -z "$uuid" ]]; then
+    if [[ -z "$domain" ]]; then
         print_error "无法读取配置"
         return 1
     fi
@@ -782,13 +1036,58 @@ show_config() {
     echo ""
     print_success "当前配置:"
     echo "  域名: $domain"
-    echo "  UUID: $uuid"
-    echo ""
+    echo "  协议: $protocol"
     
-    local vless_tls="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${uuid}&sni=${domain}#Cloudflare-Tunnel"
-    
-    print_info "📡 VLESS链接:"
-    echo "$vless_tls"
+    case "$protocol" in
+        "vless")
+            if [[ -n "$vless_uuid" ]]; then
+                echo "  VLESS UUID: $vless_uuid"
+                echo "  VLESS 路径: /$vless_uuid"
+                echo ""
+                
+                local vless_tls="vless://${vless_uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${vless_uuid}&sni=${domain}#Cloudflare-Tunnel-VLESS"
+                
+                print_info "📡 VLESS链接:"
+                echo "$vless_tls"
+            fi
+            ;;
+        "vmess")
+            if [[ -n "$vmess_uuid" ]]; then
+                echo "  VMESS UUID: $vmess_uuid"
+                echo "  VMESS 路径: /$vmess_uuid"
+                echo ""
+                
+                local vmess_link=$(generate_vmess_link "$vmess_uuid" "$domain")
+                
+                print_info "📡 VMESS链接:"
+                echo "$vmess_link"
+            fi
+            ;;
+        "both")
+            if [[ -n "$vless_uuid" ]]; then
+                echo "  VLESS UUID: $vless_uuid"
+                echo "  VLESS 路径: /$vless_uuid"
+            fi
+            if [[ -n "$vmess_uuid" ]]; then
+                echo "  VMESS UUID: $vmess_uuid"
+                echo "  VMESS 路径: /$vmess_uuid"
+            fi
+            echo ""
+            
+            if [[ -n "$vless_uuid" ]]; then
+                local vless_tls="vless://${vless_uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=%2F${vless_uuid}&sni=${domain}#Cloudflare-Tunnel-VLESS"
+                print_info "📡 VLESS链接:"
+                echo "$vless_tls"
+                echo ""
+            fi
+            
+            if [[ -n "$vmess_uuid" ]]; then
+                local vmess_link=$(generate_vmess_link "$vmess_uuid" "$domain")
+                print_info "📡 VMESS链接:"
+                echo "$vmess_link"
+            fi
+            ;;
+    esac
     echo ""
 }
 
