@@ -37,12 +37,12 @@ Cloudflare 账户
 
 一台运行 Linux 的服务器
 
-一键恢复系统初始化 + 安装常用工具脚本：注意使用
+✅一键恢复系统初始化 + 安装常用工具脚本：✅注意使用✅
 
 ```
 curl -fsSL https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/recover.sh | bash
 ```
-快速开始
+✅快速开始✅
 ```
 curl -sSL -o secure_tunnel.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/secure_tunnel.sh && chmod +x secure_tunnel.sh && sudo ./secure_tunnel.sh
 ```
