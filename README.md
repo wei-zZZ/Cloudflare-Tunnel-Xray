@@ -41,20 +41,20 @@ Cloudflare 账户
 
 
 ```
-curl -sSL -o argox.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/argow.sh && chmod +x argox.sh && sudo ./argox.sh
+curl -sSL -o secure_tunnel.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/secure_tunnel.sh && chmod +x secure_tunnel.sh && sudo ./secure_tunnel.sh
 ```
 
 
 1. 下载脚本
 ```
-curl -sSL -o argox.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/argox.sh
+curl -sSL -o secure_tunnel.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/secure_tunnel.sh
 ```
 ```
-chmod +x argox.sh
+chmod +x secure_tunnel.sh
 ```
 2. 运行脚本
 ```
-sudo ./argox.sh
+sudo ./secure_tunnel.sh
 ```
 3. 选择安装选项
 脚本提供交互式菜单，选择 1) 安装 Secure Tunnel 开始安装。
