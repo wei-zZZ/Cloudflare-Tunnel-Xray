@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
-# X-UI + Cloudflare Tunnel 正确配置脚本
-# 修复ingress配置问题
+# X-UI + Cloudflare Tunnel 正确TLS配置脚本
+# 解决TLS冲突问题
 # ============================================
 
 set -e
@@ -30,7 +30,7 @@ show_title() {
     clear
     echo ""
     echo "==============================================="
-    echo "      X-UI 隧道正确配置工具"
+    echo "      X-UI 正确TLS配置"
     echo "==============================================="
     echo ""
 }
@@ -41,43 +41,35 @@ get_config() {
     print_info "配置信息"
     echo ""
     
-    # 面板域名
+    # 域名
     while true; do
-        print_input "请输入面板访问域名 (例如: panel.9420ce.top):"
-        read -r PANEL_DOMAIN
+        print_input "请输入域名 (例如: hk2xui.9420ce.top):"
+        read -r DOMAIN
         
-        if [[ -z "$PANEL_DOMAIN" ]]; then
+        if [[ -z "$DOMAIN" ]]; then
             print_error "域名不能为空"
             continue
         fi
         
-        if [[ "$PANEL_DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9\.-]+\.[a-zA-Z]{2,}$ ]]; then
+        if [[ "$DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9\.-]+\.[a-zA-Z]{2,}$ ]]; then
             break
         else
             print_error "域名格式错误"
         fi
     done
     
-    # 节点域名
+    # X-UI面板端口
     echo ""
-    print_input "请输入节点访问域名 (例如: proxy.9420ce.top 或直接回车使用: $PANEL_DOMAIN):"
-    read -r NODE_DOMAIN
+    print_input "请输入X-UI面板端口 [默认: 54321]:"
+    read -r PANEL_PORT
+    PANEL_PORT=${PANEL_PORT:-"54321"}
     
-    if [[ -z "$NODE_DOMAIN" ]]; then
-        NODE_DOMAIN="$PANEL_DOMAIN"
-    fi
-    
-    # 节点端口
+    # Xray监听端口（X-UI入站端口）
     echo ""
-    print_input "请输入节点端口 [默认: 10086]:"
-    read -r NODE_PORT
-    NODE_PORT=${NODE_PORT:-"10086"}
-    
-    # 节点路径
-    echo ""
-    print_input "请输入节点WebSocket路径 [默认: /ws]:"
-    read -r NODE_PATH
-    NODE_PATH=${NODE_PATH:-"/ws"}
+    print_input "请输入Xray监听端口 [默认: 10000]:"
+    print_input "⚠️ 重要：Xray必须关闭TLS，只监听HTTP"
+    read -r XRAY_PORT
+    XRAY_PORT=${XRAY_PORT:-"10000"}
     
     # 隧道名称
     TUNNEL_NAME="xui-$(date +%s)"
@@ -85,19 +77,18 @@ get_config() {
     # 保存配置
     mkdir -p "$CONFIG_DIR"
     cat > "$CONFIG_DIR/.env" << EOF
-PANEL_DOMAIN=$PANEL_DOMAIN
-NODE_DOMAIN=$NODE_DOMAIN
-NODE_PORT=$NODE_PORT
-NODE_PATH=$NODE_PATH
+DOMAIN=$DOMAIN
+PANEL_PORT=$PANEL_PORT
+XRAY_PORT=$XRAY_PORT
 TUNNEL_NAME=$TUNNEL_NAME
 EOF
     
     echo ""
     print_success "配置已保存:"
-    echo "  面板域名: $PANEL_DOMAIN"
-    echo "  节点域名: $NODE_DOMAIN"
-    echo "  节点端口: $NODE_PORT"
-    echo "  节点路径: $NODE_PATH"
+    echo "  域名: $DOMAIN"
+    echo "  面板端口: $PANEL_PORT"
+    echo "  Xray端口: $XRAY_PORT"
+    echo "  ⚠️  Xray必须: TLS关闭，只监听HTTP"
     echo "  隧道名称: $TUNNEL_NAME"
     echo ""
 }
@@ -108,7 +99,6 @@ cloudflare_auth() {
     print_info "Cloudflare授权"
     echo ""
     
-    # 清理旧授权
     rm -rf /root/.cloudflared 2>/dev/null || true
     mkdir -p /root/.cloudflared
     
@@ -175,21 +165,12 @@ create_tunnel() {
     
     print_success "隧道创建成功"
     echo "隧道ID: $TUNNEL_ID"
-    echo "凭证文件: $(basename "$CRED_FILE")"
     
-    # 绑定域名（面板）
-    print_info "绑定面板域名..."
-    "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$PANEL_DOMAIN" 2>/dev/null || {
-        print_warning "面板域名绑定可能需要手动配置"
+    # 绑定域名
+    print_info "绑定域名..."
+    "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$DOMAIN" 2>/dev/null || {
+        print_warning "DNS绑定可能需要手动配置"
     }
-    
-    # 绑定域名（节点）
-    if [[ "$PANEL_DOMAIN" != "$NODE_DOMAIN" ]]; then
-        print_info "绑定节点域名..."
-        "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$NODE_DOMAIN" 2>/dev/null || {
-            print_warning "节点域名绑定可能需要手动配置"
-        }
-    fi
     
     return 0
 }
@@ -202,6 +183,7 @@ create_correct_config() {
     mkdir -p "$LOG_DIR"
     
     # 创建正确的ingress配置
+    # 使用通配符路径匹配所有UUID
     cat > "$CONFIG_DIR/config.yaml" << EOF
 tunnel: $TUNNEL_ID
 credentials-file: $CRED_FILE
@@ -209,22 +191,14 @@ logfile: $LOG_DIR/cloudflared.log
 
 ingress:
   # X-UI 面板
-  - hostname: $PANEL_DOMAIN
-    service: http://127.0.0.1:54321
+  - hostname: $DOMAIN
+    service: http://127.0.0.1:$PANEL_PORT
 
-  # 代理节点 - WebSocket
-  - hostname: $NODE_DOMAIN
-    path: $NODE_PATH
-    service: http://127.0.0.1:$NODE_PORT
-
-  # 代理节点 - 备用路径
-  - hostname: $NODE_DOMAIN
-    path: /vless
-    service: http://127.0.0.1:$NODE_PORT
-
-  - hostname: $NODE_DOMAIN
-    path: /vmess
-    service: http://127.0.0.1:$NODE_PORT
+  # 代理节点 - 通配符路径匹配所有UUID
+  # 路径格式: /[UUID]
+  - hostname: $DOMAIN
+    path: /*  # 匹配所有路径
+    service: http://127.0.0.1:$XRAY_PORT
 
   # 默认404
   - service: http_status:404
@@ -232,104 +206,102 @@ EOF
     
     print_success "ingress配置创建完成"
     echo ""
-    echo "配置文件内容:"
-    echo "========================================"
-    cat "$CONFIG_DIR/config.yaml"
-    echo "========================================"
+    echo "✅ 配置特点:"
+    echo "  1. 通配符路径 /* 匹配所有UUID"
+    echo "  2. Xray监听HTTP端口: $XRAY_PORT"
+    echo "  3. Cloudflare提供TLS加密"
     echo ""
 }
 
-# 创建X-UI节点配置指南
+# 生成X-UI配置指南
 create_xui_guide() {
-    print_info "创建X-UI配置指南..."
+    print_info "生成X-UI配置指南..."
     
     source "$CONFIG_DIR/.env"
     
-    cat > "$CONFIG_DIR/xui-setup.md" << EOF
-# X-UI 节点配置指南
+    cat > "$CONFIG_DIR/xui-guide.md" << EOF
+# X-UI 正确配置指南
+# ⚠️ 重要：解决TLS冲突问题
 
-## 1. 登录X-UI面板
-访问: http://服务器IP:54321
-用户名: admin
-密码: admin
+## 1. 核心原则
+❌ 错误：Cloudflare TLS + Xray TLS = 双TLS = 握手失败
+✅ 正确：Cloudflare TLS + Xray HTTP = 单TLS = 正常工作
 
-## 2. 创建入站节点
+## 2. X-UI入站配置
 
-### VLESS + WebSocket + TLS
+### VLESS + WebSocket (正确配置)
 \`\`\`
 备注: VLESS节点
 协议: VLESS
-端口: $NODE_PORT
-用户ID: [点击生成]
+端口: $XRAY_PORT          # 必须与隧道配置一致
+用户ID: [点击生成]        # 每个用户不同UUID
 传输协议: WebSocket (ws)
-WebSocket路径: $NODE_PATH
-主机名: $NODE_DOMAIN
-TLS: 开启
+WebSocket路径: /[UUID]    # 使用用户ID作为路径
+                           # 例如: /a1b2c3d4-e5f6-7890-abcd-ef1234567890
+主机名: $DOMAIN
+TLS: ❌ 关闭              # ⚠️ 必须关闭！
+安全: none
 \`\`\`
 
-### VMESS + WebSocket + TLS
+### VMESS + WebSocket (正确配置)
 \`\`\`
 备注: VMESS节点
 协议: VMESS
-端口: $NODE_PORT
-用户ID: [点击生成]
+端口: $XRAY_PORT          # 必须与隧道配置一致
+用户ID: [点击生成]        # 每个用户不同UUID
 额外ID: 0
 传输协议: WebSocket (ws)
-WebSocket路径: $NODE_PATH
-主机名: $NODE_DOMAIN
-TLS: 开启
+WebSocket路径: /[UUID]    # 使用用户ID作为路径
+主机名: $DOMAIN
+TLS: ❌ 关闭              # ⚠️ 必须关闭！
 \`\`\`
 
-## 3. 客户端连接配置
+## 3. 客户端连接
 
-### VLESS 客户端链接
+### VLESS链接格式
 \`\`\`
-vless://[UUID]@$NODE_DOMAIN:443?type=ws&security=tls&host=$NODE_DOMAIN&path=${NODE_PATH//\//%2F}&sni=$NODE_DOMAIN#VLESS节点
+vless://[UUID]@$DOMAIN:443
+  ?type=ws
+  &security=none          # ⚠️ 不是tls！
+  &host=$DOMAIN
+  &path=%2F[UUID]         # URL编码的斜杠 + UUID
+  &sni=$DOMAIN
 \`\`\`
 
-### VMESS 客户端链接
+### 示例UUID: a1b2c3d4-e5f6-7890-abcd-ef1234567890
 \`\`\`
-vmess://ewogICJ2IjogIjIiLAogICJwcyI6ICJWTUVTUyBub2RlIiwKICAiYWRkIjogIiROT0RFX0RPTUFJTiIsCiAgInBvcnQiOiAiNDQzIiwKICAiaWQiOiAiW1VVSURdIiwKICAiYWlkIjogIjAiLAogICJuZXQiOiAid3MiLAogICJ0eXBlIjogIm5vbmUiLAogICJob3N0IjogIiROT0RFX0RPTUFJTiIsCiAgInBhdGgiOiAiJE5PREVfUEFUSCIsCiAgInRsczoiOiAidGxzIiwKICAic25pIjogIiROT0RFX0RPTUFJTiIKfQ==
+vless://a1b2c3d4-e5f6-7890-abcd-ef1234567890@$DOMAIN:443
+  ?type=ws
+  &security=none
+  &host=$DOMAIN
+  &path=%2Fa1b2c3d4-e5f6-7890-abcd-ef1234567890
+  &sni=$DOMAIN
 \`\`\`
 
-## 4. Cloudflare 设置检查
-1. DNS 记录:
-   - $PANEL_DOMAIN → $TUNNEL_ID.cfargotunnel.com
-   - $NODE_DOMAIN → $TUNNEL_ID.cfargotunnel.com
+## 4. Cloudflare设置
+1. DNS记录:
+   - 名称: $DOMAIN
+   - 类型: CNAME
+   - 目标: $TUNNEL_ID.cfargotunnel.com
+   - 代理状态: ✅ 开启 (橙色云)
 
-2. SSL/TLS 设置:
+2. SSL/TLS:
    - 加密模式: Full
-   - 始终使用HTTPS: 开启
-   - WebSocket: 开启
+   - 始终使用HTTPS: ✅ 开启
+   - 自动HTTPS重写: ✅ 开启
+
+3. 网络:
+   - WebSocket: ✅ 开启
+   - IPv6兼容性: ✅ 开启
+
+## 5. 工作原理
+客户端 → HTTPS/TLS → Cloudflare → HTTP → Tunnel → HTTP → Xray → 目标网站
+                    │
+                    └─ Cloudflare提供TLS加密
+                       Xray只处理HTTP流量
 EOF
     
-    print_success "配置指南已创建: $CONFIG_DIR/xui-setup.md"
-}
-
-# 测试配置
-test_config() {
-    print_info "测试配置..."
-    
-    # 停止可能运行的进程
-    pkill -f cloudflared 2>/dev/null || true
-    sleep 2
-    
-    echo "测试运行隧道 (5秒)..."
-    timeout 5 "$BIN_DIR/cloudflared" tunnel --config "$CONFIG_DIR/config.yaml" run 2>&1 | tee /tmp/test.log &
-    PID=$!
-    
-    sleep 3
-    
-    if ps -p $PID > /dev/null 2>&1; then
-        print_success "✅ 配置测试成功"
-        kill $PID 2>/dev/null || true
-        return 0
-    else
-        print_warning "⚠️ 配置测试失败"
-        echo "错误信息:"
-        tail -10 /tmp/test.log
-        return 1
-    fi
+    print_success "配置指南已创建: $CONFIG_DIR/xui-guide.md"
 }
 
 # 创建系统服务
@@ -402,35 +374,29 @@ show_result() {
     source "$CONFIG_DIR/.env" 2>/dev/null || return
     
     print_success "🎯 访问地址:"
-    echo "  面板: https://$PANEL_DOMAIN"
-    echo "  节点: $NODE_DOMAIN:443"
+    echo "  面板: https://$DOMAIN"
+    echo "  节点: $DOMAIN:443"
     echo ""
     
-    print_success "🔧 节点配置:"
-    echo "  端口: $NODE_PORT"
-    echo "  路径: $NODE_PATH"
-    echo "  协议: WebSocket + TLS"
+    print_success "⚙️  配置要点:"
+    echo "  ✅ Cloudflare提供TLS加密"
+    echo "  ❌ Xray必须关闭TLS"
+    echo "  🔗 路径使用UUID: /[用户ID]"
+    echo "  📡 Xray端口: $XRAY_PORT"
     echo ""
     
-    print_success "📋 X-UI设置:"
-    echo "  1. 创建入站，端口: $NODE_PORT"
-    echo "  2. 传输协议: WebSocket"
-    echo "  3. 路径: $NODE_PATH"
-    echo "  4. 主机名: $NODE_DOMAIN"
-    echo "  5. 开启TLS"
+    print_success "📋 X-UI设置步骤:"
+    echo "  1. 创建入站，端口: $XRAY_PORT"
+    echo "  2. 协议: VLESS/VMESS + WebSocket"
+    echo "  3. 路径: /[生成的UUID]"
+    echo "  4. 主机名: $DOMAIN"
+    echo "  5. TLS: ❌ 关闭 (最重要！)"
     echo ""
     
-    print_info "🛠️  管理命令:"
-    echo "  状态: systemctl status $SERVICE_NAME"
-    echo "  日志: journalctl -u $SERVICE_NAME -f"
-    echo "  重启: systemctl restart $SERVICE_NAME"
-    echo ""
-    
-    print_warning "⚠️  重要提示:"
-    echo "  1. 检查Cloudflare DNS设置"
-    echo "  2. SSL/TLS模式设为 Full"
-    echo "  3. 开启WebSocket支持"
-    echo "  4. 等待DNS生效"
+    print_warning "⚠️  常见错误:"
+    echo "  1. Xray开启TLS → 双TLS冲突"
+    echo "  2. 路径不匹配 → 连接失败"
+    echo "  3. Cloudflare DNS未生效 → 无法访问"
     echo ""
 }
 
@@ -438,7 +404,7 @@ show_result() {
 main_install() {
     show_title
     
-    print_info "开始正确配置X-UI隧道..."
+    print_info "开始配置X-UI隧道 (解决TLS冲突)..."
     echo ""
     
     # 获取配置
@@ -459,11 +425,8 @@ main_install() {
     # 创建正确配置
     create_correct_config
     
-    # 创建配置指南
+    # 生成配置指南
     create_xui_guide
-    
-    # 测试配置
-    test_config
     
     # 创建服务
     create_service
@@ -477,15 +440,15 @@ main_install() {
     # 显示结果
     show_result
     
-    print_success "✅ 配置完成！现在可以在X-UI面板创建节点了。"
+    print_success "✅ 配置完成！请严格按照指南设置X-UI。"
     
     return 0
 }
 
-# 快速修复配置
-quick_fix_config() {
+# 快速修复TLS配置
+fix_tls_config() {
     echo ""
-    print_info "快速修复ingress配置..."
+    print_info "修复TLS配置..."
     
     if [ ! -f "$CONFIG_DIR/.env" ]; then
         print_error "未找到配置文件"
@@ -494,7 +457,7 @@ quick_fix_config() {
     
     source "$CONFIG_DIR/.env"
     
-    # 重新创建正确的ingress配置
+    # 重新创建正确配置
     cat > "$CONFIG_DIR/config.yaml" << EOF
 tunnel: $TUNNEL_ID
 credentials-file: $CRED_FILE
@@ -502,19 +465,21 @@ logfile: $LOG_DIR/cloudflared.log
 
 ingress:
   # X-UI 面板
-  - hostname: $PANEL_DOMAIN
-    service: http://127.0.0.1:54321
+  - hostname: $DOMAIN
+    service: http://127.0.0.1:$PANEL_PORT
 
-  # 代理节点 - WebSocket
-  - hostname: $NODE_DOMAIN
-    path: $NODE_PATH
-    service: http://127.0.0.1:$NODE_PORT
+  # 代理节点 - 通配符路径
+  - hostname: $DOMAIN
+    path: /*
+    service: http://127.0.0.1:$XRAY_PORT
 
-  # 默认404
   - service: http_status:404
 EOF
     
-    print_success "ingress配置已修复"
+    print_success "TLS配置已修复"
+    echo ""
+    echo "⚠️ 重要：Xray必须关闭TLS！"
+    echo ""
     
     # 重启服务
     systemctl daemon-reload
@@ -524,10 +489,6 @@ EOF
     
     if systemctl is-active --quiet $SERVICE_NAME; then
         print_success "✅ 服务重启成功"
-        
-        echo ""
-        print_info "新的ingress配置:"
-        cat "$CONFIG_DIR/config.yaml"
     else
         print_error "❌ 服务重启失败"
     fi
@@ -539,9 +500,9 @@ show_menu() {
     
     echo "请选择操作："
     echo ""
-    echo "  1) 正确配置隧道"
-    echo "  2) 修复ingress配置"
-    echo "  3) 查看配置"
+    echo "  1) 配置X-UI隧道 (解决TLS冲突)"
+    echo "  2) 修复TLS配置"
+    echo "  3) 查看配置指南"
     echo "  4) 重启服务"
     echo "  5) 退出"
     echo ""
@@ -556,22 +517,15 @@ show_menu() {
             fi
             ;;
         2)
-            quick_fix_config
+            fix_tls_config
             read -p "按回车继续..."
             ;;
         3)
             echo ""
-            if [ -f "$CONFIG_DIR/.env" ]; then
-                print_info "当前配置:"
-                cat "$CONFIG_DIR/.env"
-                echo ""
-                
-                if [ -f "$CONFIG_DIR/config.yaml" ]; then
-                    print_info "ingress配置:"
-                    cat "$CONFIG_DIR/config.yaml"
-                fi
+            if [ -f "$CONFIG_DIR/xui-guide.md" ]; then
+                cat "$CONFIG_DIR/xui-guide.md"
             else
-                echo "未找到配置"
+                echo "未找到配置指南"
             fi
             read -p "按回车继续..."
             ;;
@@ -613,7 +567,7 @@ main() {
             main_install
             ;;
         "fix")
-            quick_fix_config
+            fix_tls_config
             ;;
         "menu"|"")
             show_menu
@@ -623,7 +577,7 @@ main() {
             echo "使用方法:"
             echo "  sudo $0 menu       # 显示菜单"
             echo "  sudo $0 install    # 安装配置"
-            echo "  sudo $0 fix        # 修复配置"
+            echo "  sudo $0 fix        # 修复TLS"
             exit 1
             ;;
     esac
