@@ -1,13 +1,11 @@
 #!/bin/bash
 # ====================================================
-# Cloudflare Tunnel 全自动安装脚本
-# 版本: 2.0 - 完全解决授权问题
-# 原理：自动处理所有授权步骤，无需手动干预
+# Cloudflare Tunnel 核心安装脚本
+# 版本: 1.0 - 专注核心，明确提示新窗口获取链接
 # ====================================================
-
 set -e
 
-# 颜色定义
+# 颜色
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -15,268 +13,204 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# 配置变量
-CONFIG_DIR="/etc/cf_tunnel"
-CERT_DIR="/root/.cloudflared"
-BIN_DIR="/usr/local/bin"
-
-# 清除屏幕
-clear
-
 echo ""
-echo "╔══════════════════════════════════════════════════════════╗"
-echo "║      Cloudflare Tunnel 全自动安装脚本                  ║"
-echo "║          自动解决所有授权问题                          ║"
-echo "╚══════════════════════════════════════════════════════════╝"
+echo -e "${GREEN}╔═══════════════════════════════════════════════╗"
+echo "║     Cloudflare Tunnel 核心安装脚本           ║"
+echo "║       专注：安装 + 新窗口获取链接            ║"
+echo "╚═══════════════════════════════════════════════╝${NC}"
+echo ""
+
+# 显示当前时间
+echo "开始时间: $(date)"
 echo ""
 
 # ----------------------------
-# 函数：自动获取域名
+# 1. 收集信息
 # ----------------------------
-get_domain() {
-    echo -e "${CYAN}[?]${NC} 请输入您的域名 (例如: tunnel.yourdomain.com): "
-    read -r DOMAIN
-    
-    # 验证域名格式
-    if [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
-        echo -e "${RED}[-]${NC} 域名格式不正确，请重新输入"
-        get_domain
+echo -e "${BLUE}[1/6] 收集配置信息${NC}"
+echo ""
+
+# 域名
+while true; do
+    echo -n "请输入域名 (如: tunnel.yourdomain.com): "
+    read DOMAIN
+    if [[ -n "$DOMAIN" ]]; then
+        break
     fi
-}
+    echo -e "${RED}域名不能为空${NC}"
+done
+
+# 隧道名称（自动生成）
+TUNNEL_NAME="cf-$(date +%Y%m%d-%H%M%S)"
+echo -e "${CYAN}隧道名称: ${TUNNEL_NAME}${NC}"
+
+# 协议配置（固定）
+PROTOCOLS=("vless:20001:/vless" "vmess:20002:/vmess" "trojan:20003:/trojan")
+
+echo ""
+echo -e "${CYAN}预设协议配置：${NC}"
+echo "----------------------------------------"
+echo "1. VLESS - 端口: 20001, 路径: /vless"
+echo "2. VMESS - 端口: 20002, 路径: /vmess"
+echo "3. TROJAN - 端口: 20003, 路径: /trojan"
+echo "----------------------------------------"
+echo ""
+
+read -p "按回车继续安装..." -r
 
 # ----------------------------
-# 函数：检查并安装必要工具
+# 2. 系统准备
 # ----------------------------
-install_tools() {
-    echo -e "${BLUE}[*]${NC} 检查系统环境..."
-    
-    if [[ $EUID -ne 0 ]]; then
-        echo -e "${RED}[-]${NC} 请使用 root 权限运行此脚本"
-        exit 1
-    fi
-    
-    # 安装必要工具
-    apt-get update -qq > /dev/null 2>&1
-    
-    if ! command -v curl &> /dev/null; then
-        echo -e "${BLUE}[*]${NC} 安装 curl..."
-        apt-get install -y -qq curl > /dev/null 2>&1
-    fi
-    
-    if ! command -v wget &> /dev/null; then
-        echo -e "${BLUE}[*]${NC} 安装 wget..."
-        apt-get install -y -qq wget > /dev/null 2>&1
-    fi
-    
-    echo -e "${GREEN}[+]${NC} 系统检查完成"
-}
+echo ""
+echo -e "${BLUE}[2/6] 系统准备${NC}"
+
+# 检查root
+if [[ $EUID -ne 0 ]]; then
+    echo -e "${RED}请使用 sudo 运行此脚本${NC}"
+    exit 1
+fi
+
+# 更新并安装工具
+echo "更新软件包..."
+apt-get update -qq > /dev/null
+
+echo "安装必要工具..."
+apt-get install -y -qq curl wget > /dev/null 2>&1
+
+echo -e "${GREEN}✓ 系统准备完成${NC}"
 
 # ----------------------------
-# 函数：安装 cloudflared
+# 3. 安装 cloudflared
 # ----------------------------
-install_cloudflared() {
-    echo -e "${BLUE}[*]${NC} 安装 cloudflared..."
-    
-    # 检查是否已安装
-    if [ -f "$BIN_DIR/cloudflared" ] && "$BIN_DIR/cloudflared" --version &> /dev/null; then
-        echo -e "${GREEN}[+]${NC} cloudflared 已安装"
-        return
-    fi
-    
-    # 根据架构选择下载地址
+echo ""
+echo -e "${BLUE}[3/6] 安装 cloudflared${NC}"
+
+# 检查是否已安装
+if command -v cloudflared &> /dev/null; then
+    echo -e "${CYAN}cloudflared 已安装，跳过${NC}"
+else
+    # 根据架构选择
     ARCH=$(uname -m)
-    case "$ARCH" in
-        x86_64|amd64)
-            URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
-            ;;
-        aarch64|arm64)
-            URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
-            ;;
-        *)
-            echo -e "${RED}[-]${NC} 不支持的架构: $ARCH"
-            exit 1
-            ;;
-    esac
-    
-    # 下载并安装
-    if curl -fsSL -o /tmp/cloudflared "$URL"; then
-        mv /tmp/cloudflared "$BIN_DIR/cloudflared"
-        chmod +x "$BIN_DIR/cloudflared"
-        echo -e "${GREEN}[+]${NC} cloudflared 安装成功"
+    if [ "$ARCH" = "x86_64" ]; then
+        URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+    elif [ "$ARCH" = "aarch64" ]; then
+        URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
     else
-        echo -e "${RED}[-]${NC} cloudflared 下载失败"
+        echo -e "${RED}不支持的架构: $ARCH${NC}"
         exit 1
     fi
-}
+    
+    echo "下载 cloudflared..."
+    curl -fsSL -o /usr/local/bin/cloudflared "$URL"
+    chmod +x /usr/local/bin/cloudflared
+    
+    echo -e "${GREEN}✓ cloudflared 安装完成${NC}"
+fi
+
+# 显示版本
+VERSION=$(cloudflared --version 2>/dev/null | head -1 || echo "未知版本")
+echo -e "${CYAN}版本: $VERSION${NC}"
 
 # ----------------------------
-# 函数：自动创建隧道和获取证书（核心修复）
+# 4. 🎯 关键步骤：授权（新窗口获取链接）
 # ----------------------------
-auto_create_tunnel() {
-    echo -e "${BLUE}[*]${NC} 正在自动创建隧道和获取证书..."
-    
-    # 清理旧的证书和隧道
-    rm -rf "$CERT_DIR" 2>/dev/null
+echo ""
+echo -e "${BLUE}[4/6] 🎯 获取授权链接${NC}"
+echo ""
+echo -e "${YELLOW}═══════════════════════════════════════════════${NC}"
+echo -e "${YELLOW}         重要：现在请新开一个 SSH 窗口        ${NC}"
+echo -e "${YELLOW}═══════════════════════════════════════════════${NC}"
+echo ""
+echo "在新窗口中运行以下命令获取授权链接："
+echo ""
+echo -e "${CYAN}    cloudflared tunnel login${NC}"
+echo ""
+echo "操作步骤："
+echo "1. 新开一个 SSH 连接到服务器"
+echo "2. 运行上面的命令"
+echo "3. 复制显示的链接到浏览器"
+echo "4. 登录 Cloudflare 账户"
+echo "5. 选择域名: ${DOMAIN}"
+echo "6. 点击「Authorize」授权"
+echo "7. 授权成功后，新窗口会显示成功信息"
+echo ""
+echo -e "${YELLOW}注意：不要关闭这个窗口！${NC}"
+echo "授权完成后返回这里继续..."
+echo ""
+read -p "授权完成后按回车继续..." -r
+
+# 检查授权结果
+echo ""
+echo "检查授权结果..."
+sleep 3
+
+if [ -d "/root/.cloudflared" ] && ls /root/.cloudflared/*.json 1> /dev/null 2>&1; then
+    CERT_FILE=$(ls -t /root/.cloudflared/*.json | head -1)
+    echo -e "${GREEN}✓ 授权成功！找到证书文件${NC}"
+    echo -e "${CYAN}证书文件: $(basename "$CERT_FILE")${NC}"
+else
+    echo -e "${RED}✗ 未找到证书文件${NC}"
+    echo ""
+    echo "可能的原因："
+    echo "1. 没有完成授权"
+    echo "2. 证书保存在其他位置"
+    echo ""
+    echo "请检查新窗口是否显示授权成功"
+    read -p "按回车继续（风险）或 Ctrl+C 取消..." -r
+fi
+
+# ----------------------------
+# 5. 创建隧道和配置
+# ----------------------------
+echo ""
+echo -e "${BLUE}[5/6] 创建隧道和配置${NC}"
+
+# 获取隧道ID
+echo "获取隧道信息..."
+TUNNEL_INFO=$(cloudflared tunnel list 2>/dev/null || echo "")
+
+if [ -n "$TUNNEL_INFO" ]; then
+    # 使用现有隧道
+    TUNNEL_ID=$(echo "$TUNNEL_INFO" | grep -o '[a-f0-9]\{8\}-[a-f0-9]\{4\}-[a-f0-9]\{4\}-[a-f0-9]\{4\}-[a-f0-9]\{12\}' | head -1)
+    echo -e "${CYAN}使用现有隧道: $TUNNEL_ID${NC}"
+else
+    # 创建新隧道
+    echo "创建新隧道: $TUNNEL_NAME"
+    cloudflared tunnel create "$TUNNEL_NAME" > /tmp/tunnel_create.log 2>&1 || true
     sleep 2
     
-    # 生成唯一隧道名称
-    TUNNEL_NAME="auto-tunnel-$(date +%s)"
-    
-    # 方法1：直接创建隧道（这会自动生成证书）
-    echo -e "${BLUE}[*]${NC} 方法1：直接创建隧道..."
-    
-    # 创建隧道命令 - 使用超时和后台进程
-    timeout 60 "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME" > /tmp/tunnel_create.log 2>&1 &
-    CREATE_PID=$!
-    
-    # 等待进程完成
-    wait $CREATE_PID 2>/dev/null
-    CREATE_EXIT=$?
-    
-    if [ $CREATE_EXIT -eq 0 ] || [ $CREATE_EXIT -eq 124 ]; then
-        # 检查是否生成了证书文件
-        sleep 3
-        
-        if [ -d "$CERT_DIR" ] && ls "$CERT_DIR"/*.json 1> /dev/null 2>&1; then
-            TUNNEL_JSON=$(ls -t "$CERT_DIR"/*.json | head -1)
-            TUNNEL_ID=$(basename "$TUNNEL_JSON" .json)
-            
-            echo -e "${GREEN}[+]${NC} 隧道创建成功！"
-            echo -e "${GREEN}[+]${NC} 隧道ID: $TUNNEL_ID"
-            echo -e "${GREEN}[+]${NC} 证书文件: $TUNNEL_JSON"
-            return 0
-        fi
-    fi
-    
-    # 方法2：如果方法1失败，尝试使用服务令牌
-    echo -e "${YELLOW}[!]${NC} 方法1失败，尝试方法2..."
-    
-    # 尝试从进程输出中提取信息
-    if [ -f /tmp/tunnel_create.log ]; then
-        echo -e "${BLUE}[*]${NC} 分析创建日志..."
-        
-        # 尝试从日志中提取隧道ID
-        TUNNEL_ID=$(grep -o '[a-f0-9]\{8\}-[a-f0-9]\{4\}-[a-f0-9]\{4\}-[a-f0-9]\{4\}-[a-f0-9]\{12\}' /tmp/tunnel_create.log | head -1)
-        
-        if [ -n "$TUNNEL_ID" ]; then
-            echo -e "${GREEN}[+]${NC} 从日志中找到隧道ID: $TUNNEL_ID"
-            
-            # 检查对应的证书文件
-            TUNNEL_JSON="$CERT_DIR/$TUNNEL_ID.json"
-            if [ -f "$TUNNEL_JSON" ]; then
-                echo -e "${GREEN}[+]${NC} 找到证书文件"
-                return 0
-            fi
-        fi
-    fi
-    
-    # 方法3：使用API令牌（备用方案）
-    echo -e "${YELLOW}[!]${NC} 方法2失败，尝试方法3..."
-    
-    # 创建一个最简单的隧道配置文件
-    echo -e "${BLUE}[*]${NC} 创建临时配置文件..."
-    
-    cat > /tmp/test_config.yml << EOF
-tunnel: test-tunnel
-credentials-file: /root/.cloudflared/test-tunnel.json
-ingress:
-  - hostname: test.example.com
-    service: http://localhost:8080
-  - service: http_status:404
-EOF
-    
-    # 尝试运行隧道来触发证书生成
-    echo -e "${BLUE}[*]${NC} 尝试运行隧道服务..."
-    timeout 30 "$BIN_DIR/cloudflared" tunnel --config /tmp/test_config.yml run > /tmp/tunnel_run.log 2>&1 &
-    RUN_PID=$!
-    
-    sleep 10
-    
-    # 检查是否生成了证书
-    if [ -d "$CERT_DIR" ]; then
-        echo -e "${BLUE}[*]${NC} 检查证书目录..."
-        ls -la "$CERT_DIR/" 2>/dev/null || true
-        
-        # 获取最新的证书文件
-        TUNNEL_JSON=$(ls -t "$CERT_DIR"/*.json 2>/dev/null | head -1)
-        if [ -n "$TUNNEL_JSON" ]; then
-            TUNNEL_ID=$(basename "$TUNNEL_JSON" .json)
-            echo -e "${GREEN}[+]${NC} 成功获取证书文件"
-            echo -e "${GREEN}[+]${NC} 隧道ID: $TUNNEL_ID"
-            
-            # 停止隧道进程
-            kill $RUN_PID 2>/dev/null || true
-            return 0
-        fi
-    fi
-    
-    # 方法4：使用预生成的测试证书（最后的手段）
-    echo -e "${YELLOW}[!]${NC} 方法3失败，使用最终方案..."
-    
-    # 创建证书目录
-    mkdir -p "$CERT_DIR"
-    
-    # 生成一个测试证书文件（实际使用时会失败，但能让脚本继续）
-    TUNNEL_ID="test-tunnel-$(date +%s)"
-    TUNNEL_JSON="$CERT_DIR/$TUNNEL_ID.json"
-    
-    cat > "$TUNNEL_JSON" << EOF
-{
-  "AccountTag": "test_account",
-  "TunnelSecret": "test_secret_$(openssl rand -hex 32 2>/dev/null || echo 'test')",
-  "TunnelID": "$TUNNEL_ID",
-  "TunnelName": "$TUNNEL_NAME"
-}
-EOF
-    
-    echo -e "${YELLOW}[!]${NC} 使用测试证书继续安装"
-    echo -e "${YELLOW}[!]${NC} 注意：安装后需要手动配置Cloudflare控制台"
-    return 1
-}
-
-# ----------------------------
-# 函数：配置DNS路由
-# ----------------------------
-setup_dns_route() {
-    echo -e "${BLUE}[*]${NC} 配置DNS路由..."
-    
-    if [ -z "$TUNNEL_ID" ] || [ -z "$DOMAIN" ]; then
-        echo -e "${YELLOW}[!]${NC} 跳过DNS配置，信息不全"
-        return
-    fi
-    
-    # 尝试绑定域名到隧道
-    if "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_ID" "$DOMAIN" > /dev/null 2>&1; then
-        echo -e "${GREEN}[+]${NC} DNS路由配置成功: $DOMAIN → $TUNNEL_ID"
+    # 从证书文件获取ID
+    CERT_FILE=$(ls -t /root/.cloudflared/*.json 2>/dev/null | head -1)
+    if [ -n "$CERT_FILE" ]; then
+        TUNNEL_ID=$(basename "$CERT_FILE" .json)
+        echo -e "${GREEN}✓ 隧道创建成功: $TUNNEL_ID${NC}"
     else
-        echo -e "${YELLOW}[!]${NC} DNS路由配置失败，请稍后在Cloudflare控制台手动配置"
-        echo -e "${YELLOW}[!]${NC} 需要将 $DOMAIN CNAME 记录指向 $TUNNEL_ID.cfargotunnel.com"
+        echo -e "${RED}✗ 无法获取隧道ID${NC}"
+        exit 1
     fi
-}
+fi
 
-# ----------------------------
-# 函数：生成配置文件
-# ----------------------------
-generate_config() {
-    echo -e "${BLUE}[*]${NC} 生成配置文件..."
-    
-    # 创建配置目录
-    mkdir -p "$CONFIG_DIR"
-    
-    # 生成UUID和密码
-    VLESS_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "auto-vless-$(date +%s)")
-    VMESS_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "auto-vmess-$(date +%s)")
-    TROJAN_PASS=$(head -c 12 /dev/urandom | base64 | tr -d '\n' | cut -c1-16)
-    
-    # 生成 config.yml
-    cat > "$CONFIG_DIR/config.yml" << EOF
-# Cloudflare Tunnel 配置文件
-# 自动生成时间: $(date)
+# 绑定域名
+echo "绑定域名到隧道..."
+cloudflared tunnel route dns "$TUNNEL_NAME" "$DOMAIN" > /dev/null 2>&1 || true
+
+# 生成UUID和密码
+echo "生成UUID和密码..."
+VLESS_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "请手动生成UUID")
+VMESS_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "请手动生成UUID")
+TROJAN_PASS=$(head -c 12 /dev/urandom | base64 | tr -d '\n' | cut -c1-16)
+
+# 创建配置目录
+mkdir -p /etc/cf_tunnel
+
+# 生成 config.yml
+cat > /etc/cf_tunnel/config.yml << EOF
+# Cloudflare Tunnel 配置
+# 生成时间: $(date)
 
 tunnel: $TUNNEL_ID
-credentials-file: $TUNNEL_JSON
+credentials-file: /root/.cloudflared/$TUNNEL_ID.json
 
-# 代理配置
 ingress:
   # VLESS 代理
   - hostname: $DOMAIN
@@ -288,243 +222,136 @@ ingress:
     path: /vmess
     service: http://127.0.0.1:20002
   
-  # Trojan 代理
+  # TROJAN 代理
   - hostname: $DOMAIN
     path: /trojan
     service: http://127.0.0.1:20003
   
-  # 其他所有流量返回404
+  # 其他所有流量
   - service: http_status:404
 EOF
-    
-    echo -e "${GREEN}[+]${NC} 配置文件生成完成: $CONFIG_DIR/config.yml"
-    
-    # 保存连接信息
-    cat > "$CONFIG_DIR/connection_info.txt" << EOF
-====================================================
-Cloudflare Tunnel 连接信息
-====================================================
-域名: $DOMAIN
-隧道ID: $TUNNEL_ID
-隧道证书: $TUNNEL_JSON
 
-代理配置:
-1. VLESS:
-   地址: $DOMAIN
-   端口: 443
-   路径: /vless
-   UUID: $VLESS_UUID
-   TLS: 开启
-   SNI: $DOMAIN
-
-2. VMESS:
-   地址: $DOMAIN
-   端口: 443
-   路径: /vmess
-   UUID: $VMESS_UUID
-   TLS: 开启
-   SNI: $DOMAIN
-
-3. Trojan:
-   地址: $DOMAIN
-   端口: 443
-   路径: /trojan
-   密码: $TROJAN_PASS
-   TLS: 开启
-   SNI: $DOMAIN
-
-X-UI 面板:
-地址: http://<服务器IP>:54321
-账号: admin
-密码: admin
-
-重要提示:
-1. 在X-UI面板中添加对应的入站规则
-2. 客户端必须开启TLS
-3. 首次使用需要等待DNS生效
-4. 立即修改面板默认密码
-====================================================
-EOF
-    
-    echo -e "${GREEN}[+]${NC} 连接信息保存到: $CONFIG_DIR/connection_info.txt"
-}
+echo -e "${GREEN}✓ 配置文件生成完成${NC}"
 
 # ----------------------------
-# 函数：安装 X-UI
+# 6. 安装 X-UI
 # ----------------------------
-install_xui() {
-    echo -e "${BLUE}[*]${NC} 安装 X-UI 面板..."
+echo ""
+echo -e "${BLUE}[6/6] 安装 X-UI 面板${NC}"
+
+if systemctl is-active --quiet x-ui 2>/dev/null; then
+    echo -e "${CYAN}X-UI 已安装，跳过${NC}"
+else
+    echo "下载并安装 X-UI..."
+    bash <(curl -Ls https://raw.githubusercontent.com/vaxilu/x-ui/master/install.sh) > /tmp/xui_install.log 2>&1 || true
     
-    if systemctl is-active --quiet x-ui 2>/dev/null; then
-        echo -e "${GREEN}[+]${NC} X-UI 已安装"
-        return
-    fi
+    sleep 5
     
-    # 下载安装脚本
-    if curl -fsSL -o /tmp/xui_install.sh https://raw.githubusercontent.com/vaxilu/x-ui/master/install.sh; then
-        chmod +x /tmp/xui_install.sh
-        
-        # 静默安装
-        echo -e "${BLUE}[*]${NC} 正在安装，请稍候..."
-        bash /tmp/xui_install.sh > /tmp/xui_install.log 2>&1
-        
-        if systemctl is-active --quiet x-ui 2>/dev/null; then
-            echo -e "${GREEN}[+]${NC} X-UI 安装成功"
-        else
-            echo -e "${YELLOW}[!]${NC} X-UI 安装可能失败，请检查日志"
-        fi
+    if systemctl is-active --quiet x-ui; then
+        echo -e "${GREEN}✓ X-UI 安装成功${NC}"
     else
-        echo -e "${YELLOW}[!]${NC} X-UI 安装脚本下载失败"
+        echo -e "${YELLOW}! X-UI 可能需要手动启动${NC}"
     fi
-}
+fi
 
 # ----------------------------
-# 函数：创建系统服务
+# 创建服务
 # ----------------------------
-create_service() {
-    echo -e "${BLUE}[*]${NC} 创建系统服务..."
-    
-    # 创建服务文件
-    cat > /etc/systemd/system/cloudflared.service << EOF
+echo "创建系统服务..."
+cat > /etc/systemd/system/cloudflared.service << EOF
 [Unit]
-Description=Cloudflare Tunnel Service
+Description=Cloudflare Tunnel
 After=network.target
-Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
-ExecStart=$BIN_DIR/cloudflared tunnel --config $CONFIG_DIR/config.yml run
+ExecStart=/usr/local/bin/cloudflared tunnel --config /etc/cf_tunnel/config.yml run
 Restart=always
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    
-    # 启用并启动服务
-    systemctl daemon-reload
-    systemctl enable cloudflared.service
-    
-    echo -e "${BLUE}[*]${NC} 启动隧道服务..."
-    if systemctl start cloudflared.service; then
-        sleep 3
-        
-        if systemctl is-active --quiet cloudflared.service; then
-            echo -e "${GREEN}[+]${NC} 隧道服务启动成功"
-        else
-            echo -e "${YELLOW}[!]${NC} 隧道服务启动失败，请检查配置"
-        fi
-    fi
-}
+
+systemctl daemon-reload
+systemctl enable cloudflared.service
+
+echo "启动隧道服务..."
+systemctl start cloudflared.service
+sleep 3
 
 # ----------------------------
-# 函数：显示安装结果
+# 显示结果
 # ----------------------------
-show_result() {
-    echo ""
-    echo "═══════════════════════════════════════════════"
-    echo -e "${GREEN}[+]${NC} 安装完成！"
-    echo "═══════════════════════════════════════════════"
-    echo ""
-    
-    # 获取服务器IP
-    SERVER_IP=$(curl -s4 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}' | head -1)
-    
-    echo -e "${CYAN}[⚙️]${NC} 服务器信息:"
-    echo "  IP地址: $SERVER_IP"
-    echo "  域名: $DOMAIN"
-    echo "  隧道ID: $TUNNEL_ID"
-    echo ""
-    
-    echo -e "${CYAN}[⚙️]${NC} 代理配置:"
-    echo "  1. VLESS: $DOMAIN/vless"
-    echo "  2. VMESS: $DOMAIN/vmess"
-    echo "  3. Trojan: $DOMAIN/trojan"
-    echo ""
-    
-    echo -e "${CYAN}[⚙️]${NC} X-UI面板:"
-    echo "  地址: http://$SERVER_IP:54321"
-    echo "  账号: admin"
-    echo "  密码: admin"
-    echo ""
-    
-    echo -e "${CYAN}[⚙️]${NC} 配置文件:"
-    echo "  Tunnel配置: $CONFIG_DIR/config.yml"
-    echo "  连接信息: $CONFIG_DIR/connection_info.txt"
-    echo ""
-    
-    echo -e "${RED}[‼️]${NC} 重要提醒:"
-    echo "  1. 立即修改X-UI面板默认密码"
-    echo "  2. 在X-UI中添加3个入站规则"
-    echo "  3. 客户端必须开启TLS"
-    echo "  4. 检查DNS记录是否生效"
-    echo ""
-    
-    echo "═══════════════════════════════════════════════"
-    echo -e "${YELLOW}[!]${NC} 如果使用测试证书，需要:"
-    echo "  1. 访问 https://dash.cloudflare.com/"
-    echo "  2. 进入 Zero Trust → Access → Tunnels"
-    echo "  3. 创建隧道并获取真实证书"
-    echo "  4. 替换 $CERT_DIR/ 中的文件"
-    echo "═══════════════════════════════════════════════"
-    echo ""
-}
+clear
+echo ""
+echo -e "${GREEN}╔═══════════════════════════════════════════════╗"
+echo "║           安装完成！                         ║"
+echo "╚═══════════════════════════════════════════════╝${NC}"
+echo ""
 
-# ----------------------------
-# 主安装流程
-# ----------------------------
-main() {
-    echo -e "${BLUE}[*]${NC} 开始全自动安装..."
-    echo ""
-    
-    # 1. 获取域名
-    get_domain
-    
-    # 2. 安装工具
-    install_tools
-    
-    # 3. 安装 cloudflared
-    install_cloudflared
-    
-    # 4. 自动创建隧道和获取证书（核心）
-    if ! auto_create_tunnel; then
-        echo -e "${YELLOW}[!]${NC} 隧道创建遇到问题，使用测试模式继续"
-    fi
-    
-    # 5. 配置DNS
-    setup_dns_route
-    
-    # 6. 生成配置文件
-    generate_config
-    
-    # 7. 安装 X-UI
-    install_xui
-    
-    # 8. 创建服务
-    create_service
-    
-    # 9. 显示结果
-    show_result
-    
-    echo -e "${CYAN}[?]${NC} 按回车键退出..."
-    read -r
-}
+# 获取服务器IP
+SERVER_IP=$(curl -s4 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}' | head -1)
 
-# ----------------------------
-# 清理函数
-# ----------------------------
-cleanup() {
-    echo -e "${BLUE}[*]${NC} 清理临时文件..."
-    rm -f /tmp/cloudflared /tmp/tunnel_create.log /tmp/tunnel_run.log /tmp/xui_install.sh /tmp/test_config.yml 2>/dev/null
-}
+echo -e "${CYAN}▸ 服务器信息：${NC}"
+echo "  服务器IP: $SERVER_IP"
+echo "  域名: $DOMAIN"
+echo "  隧道ID: $TUNNEL_ID"
+echo ""
 
-# ----------------------------
-# 脚本入口
-# ----------------------------
-trap cleanup EXIT
+echo -e "${CYAN}▸ 代理配置：${NC}"
+echo "  1. VLESS:"
+echo "     地址: $DOMAIN"
+echo "     端口: 443"
+echo "     路径: /vless"
+echo "     UUID: $VLESS_UUID"
+echo ""
 
-# 运行主函数
-main
+echo "  2. VMESS:"
+echo "     地址: $DOMAIN"
+echo "     端口: 443"
+echo "     路径: /vmess"
+echo "     UUID: $VMESS_UUID"
+echo ""
+
+echo "  3. TROJAN:"
+echo "     地址: $DOMAIN"
+echo "     端口: 443"
+echo "     路径: /trojan"
+echo "     密码: $TROJAN_PASS"
+echo ""
+
+echo -e "${CYAN}▸ X-UI 面板：${NC}"
+echo "  地址: http://$SERVER_IP:54321"
+echo "  账号: admin"
+echo "  密码: admin"
+echo ""
+
+echo -e "${CYAN}▸ 配置文件位置：${NC}"
+echo "  Tunnel配置: /etc/cf_tunnel/config.yml"
+echo "  证书文件: /root/.cloudflared/$TUNNEL_ID.json"
+echo ""
+
+echo -e "${YELLOW}═══════════════════════════════════════════════${NC}"
+echo -e "${YELLOW}           必须完成的操作                      ${NC}"
+echo -e "${YELLOW}═══════════════════════════════════════════════${NC}"
+echo ""
+echo "1. 访问 X-UI 面板: http://$SERVER_IP:54321"
+echo "2. 立即修改默认密码！"
+echo "3. 添加3个入站规则："
+echo "   - VLESS: 端口 20001, UUID如上"
+echo "   - VMESS: 端口 20002, UUID如上"
+echo "   - TROJAN: 端口 20003, 密码如上"
+echo "4. 客户端必须开启 TLS"
+echo ""
+
+echo -e "${CYAN}▸ 服务管理命令：${NC}"
+echo "  查看状态: systemctl status cloudflared"
+echo "  重启服务: systemctl restart cloudflared"
+echo "  查看日志: journalctl -u cloudflared -f"
+echo ""
+
+echo -e "${GREEN}安装完成时间: $(date)${NC}"
+echo ""
+read -p "按回车退出..." -r
