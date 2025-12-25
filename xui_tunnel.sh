@@ -1,11 +1,7 @@
 #!/bin/bash
 # ====================================================
-# Cloudflare Tunnel + X-UI 安装脚本（最终修正版）
-# 版本: 2.0 - 完全解决所有架构问题
-# 修正内容：
-# 1. 正确获取和使用 Tunnel UUID（非名称）
-# 2. Tunnel 只处理代理流量，面板通过IP直连
-# 3. 架构完全分离，零风险暴露
+# Cloudflare Tunnel + X-UI 安装脚本（带卸载功能）
+# 版本: 2.1 - 修复授权问题 + 完整卸载
 # ====================================================
 set -e
 
@@ -26,7 +22,6 @@ print_error() { echo -e "${RED}[-]${NC} $1"; }
 print_input() { echo -e "${CYAN}[?]${NC} $1"; }
 print_config() { echo -e "${CYAN}[⚙️]${NC} $1"; }
 print_step() { echo -e "${GREEN}[→]${NC} $1"; }
-print_critical() { echo -e "${RED}[‼️]${NC} $1"; }
 
 # ----------------------------
 # 配置变量
@@ -39,837 +34,767 @@ USER_DOMAIN=""
 TUNNEL_NAME="cf-proxy-tunnel"
 PROXY_PORT=10086
 PANEL_PORT=54321
-WS_PATH="/proxy"  # 固定WebSocket路径
-TUNNEL_ID=""  # 必须从创建输出中获取
-SILENT_MODE=false
+WS_PATH="/proxy"
+TUNNEL_ID=""
+CERT_DIR="/root/.cloudflared"
 
 # ----------------------------
-# 显示标题
+# 显示菜单
 # ----------------------------
-show_title() {
+show_menu() {
     clear
     echo ""
-    echo "╔══════════════════════════════════════════════════════════╗"
-    echo "║     Cloudflare Tunnel + X-UI 安装脚本（最终架构版）     ║"
-    echo "║     Tunnel只处理代理 | 面板IP直连 | 零暴露风险         ║"
-    echo "╚══════════════════════════════════════════════════════════╝"
+    echo "╔═══════════════════════════════════════════════╗"
+    echo "║    Cloudflare Tunnel 管理脚本                ║"
+    echo "║           带完整卸载功能                    ║"
+    echo "╚═══════════════════════════════════════════════╝"
     echo ""
-    print_critical "架构原则：Tunnel只处理/proxy流量，面板通过服务器IP直连访问"
+    echo "1. 全新安装 Cloudflare Tunnel + X-UI"
+    echo "2. 仅修复授权问题（重新授权）"
+    echo "3. 完全卸载（删除所有文件和服务）"
+    echo "4. 查看当前状态"
+    echo "5. 退出"
     echo ""
+    print_input "请选择操作 (1-5): "
+    read -r choice
+    echo ""
+    
+    case $choice in
+        1) main_install ;;
+        2) fix_auth_only ;;
+        3) uninstall_all ;;
+        4) show_status ;;
+        5) exit 0 ;;
+        *) print_error "无效选择"; sleep 2; show_menu ;;
+    esac
 }
 
 # ----------------------------
-# 系统检查
+# 修复授权问题（单独功能）
 # ----------------------------
-check_system() {
-    print_step "1. 检查系统环境"
+fix_auth_only() {
+    print_step "修复 Cloudflare 授权问题"
+    echo ""
     
+    # 清理所有旧的授权文件
+    print_info "清理旧的授权文件..."
+    rm -rf "$CERT_DIR" 2>/dev/null
+    rm -rf /root/.cloudflared 2>/dev/null
+    sleep 2
+    
+    # 检查 cloudflared 是否安装
+    if [ ! -f "$BIN_DIR/cloudflared" ]; then
+        print_error "cloudflared 未安装，请先运行全新安装"
+        sleep 3
+        show_menu
+        return
+    fi
+    
+    # 获取域名（如果已存在配置）
+    if [ -f "$CONFIG_DIR/config.yml" ]; then
+        USER_DOMAIN=$(grep -oP "hostname: \K[^ ]+" "$CONFIG_DIR/config.yml" | head -1)
+        if [ -n "$USER_DOMAIN" ]; then
+            print_info "从配置文件找到域名: $USER_DOMAIN"
+        fi
+    fi
+    
+    if [ -z "$USER_DOMAIN" ]; then
+        print_input "请输入您的域名 (例如: tunnel.yourdomain.com): "
+        read -r USER_DOMAIN
+    fi
+    
+    # 运行授权命令
+    echo ""
+    print_info "开始 Cloudflare 授权..."
+    echo "=============================================="
+    print_config "重要：请确保您有 $USER_DOMAIN 域名的管理权限"
+    print_config "如果域名不在当前账户，请先添加到Cloudflare"
+    echo "=============================================="
+    echo ""
+    print_input "按回车开始授权..."
+    read -r
+    
+    # 运行授权
+    echo ""
+    echo "正在打开授权页面..."
+    echo "如果浏览器没有自动打开，请手动复制下面的链接："
+    echo ""
+    
+    # 运行授权并显示链接
+    if ! "$BIN_DIR/cloudflared" tunnel login; then
+        echo ""
+        print_error "授权命令执行失败"
+        echo ""
+        print_info "尝试替代方案："
+        echo "1. 请访问: https://dash.cloudflare.com/"
+        echo "2. 进入您的域名"
+        echo "3. 在左侧菜单找到「Access」→「Tunnels」"
+        echo "4. 点击「Create a tunnel」生成证书"
+        echo ""
+        print_input "手动操作完成后按回车继续..."
+        read -r
+    fi
+    
+    # 验证授权结果
+    echo ""
+    print_info "验证授权结果..."
+    
+    local cert_count=0
+    if [ -d "$CERT_DIR" ]; then
+        cert_count=$(ls "$CERT_DIR"/*.json 2>/dev/null | wc -l)
+    fi
+    
+    if [ "$cert_count" -gt 0 ]; then
+        print_success "授权成功！找到 $cert_count 个证书文件"
+        
+        # 显示证书文件
+        echo ""
+        print_info "证书文件列表:"
+        ls -la "$CERT_DIR"/*.json 2>/dev/null || echo "无"
+        
+        # 尝试重启服务
+        if systemctl is-active --quiet cloudflared 2>/dev/null; then
+            print_info "重启 cloudflared 服务..."
+            systemctl restart cloudflared
+            sleep 3
+            
+            if systemctl is-active --quiet cloudflared; then
+                print_success "服务重启成功"
+            else
+                print_warning "服务重启失败，请手动检查"
+            fi
+        fi
+    else
+        print_error "未找到证书文件，授权可能失败"
+        print_info "请检查:"
+        echo "1. 是否正确登录Cloudflare账户"
+        echo "2. 是否选择了正确的域名"
+        echo "3. 是否点击了「授权」按钮"
+        
+        # 提供手动解决方案
+        echo ""
+        print_warning "手动解决方案："
+        echo "1. 访问: https://dash.cloudflare.com/"
+        echo "2. 进入「Zero Trust」→「Access」→「Tunnels」"
+        echo "3. 点击「Create Tunnel」"
+        echo "4. 输入隧道名称，选择免费计划"
+        echo "5. 保存后会显示「Install connector」"
+        echo "6. 在「Run the connector」部分可以找到证书"
+    fi
+    
+    echo ""
+    print_input "按回车返回主菜单..."
+    read -r
+    show_menu
+}
+
+# ----------------------------
+# 完全卸载功能
+# ----------------------------
+uninstall_all() {
+    print_step "开始完全卸载"
+    echo ""
+    print_warning "⚠️  这将删除所有相关文件、配置和服务！"
+    print_warning "   包括：Cloudflare Tunnel、X-UI、配置文件、证书等"
+    echo ""
+    
+    print_input "确认要完全卸载吗？(y/N): "
+    read -r confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        print_info "取消卸载"
+        sleep 2
+        show_menu
+        return
+    fi
+    
+    echo ""
+    print_info "停止服务..."
+    systemctl stop cloudflared 2>/dev/null
+    systemctl stop x-ui 2>/dev/null
+    
+    print_info "禁用服务..."
+    systemctl disable cloudflared 2>/dev/null
+    systemctl disable x-ui 2>/dev/null
+    
+    print_info "删除服务文件..."
+    rm -f /etc/systemd/system/cloudflared.service
+    rm -f /etc/systemd/system/x-ui.service 2>/dev/null
+    
+    print_info "删除二进制文件..."
+    rm -f "$BIN_DIR/cloudflared"
+    rm -f "$BIN_DIR/xray" 2>/dev/null
+    
+    print_info "删除配置文件和目录..."
+    rm -rf "$CONFIG_DIR"
+    rm -rf "$LOG_DIR"
+    rm -rf "$CERT_DIR"
+    rm -rf /etc/x-ui 2>/dev/null
+    rm -rf /usr/local/x-ui 2>/dev/null
+    rm -rf /root/x-ui 2>/dev/null
+    
+    print_info "删除日志文件..."
+    rm -rf /var/log/cloudflared* 2>/dev/null
+    rm -rf /var/log/x-ui* 2>/dev/null
+    
+    print_info "清理系统配置..."
+    systemctl daemon-reload
+    
+    # 检查是否删除干净
+    echo ""
+    print_info "验证卸载结果:"
+    
+    local remaining=0
+    if [ -f "$BIN_DIR/cloudflared" ]; then
+        print_warning "剩余文件: $BIN_DIR/cloudflared"
+        remaining=1
+    fi
+    
+    if [ -d "$CONFIG_DIR" ]; then
+        print_warning "剩余目录: $CONFIG_DIR"
+        remaining=1
+    fi
+    
+    if [ -d "$CERT_DIR" ]; then
+        print_warning "剩余证书: $CERT_DIR"
+        remaining=1
+    fi
+    
+    if systemctl list-unit-files | grep -q "cloudflared"; then
+        print_warning "剩余服务: cloudflared"
+        remaining=1
+    fi
+    
+    if systemctl list-unit-files | grep -q "x-ui"; then
+        print_warning "剩余服务: x-ui"
+        remaining=1
+    fi
+    
+    if [ "$remaining" -eq 0 ]; then
+        print_success "✅ 完全卸载完成！所有文件和服务已清理。"
+    else
+        print_warning "⚠️  部分文件可能未完全删除，请手动检查。"
+    fi
+    
+    echo ""
+    print_input "按回车返回主菜单..."
+    read -r
+    show_menu
+}
+
+# ----------------------------
+# 查看当前状态
+# ----------------------------
+show_status() {
+    print_step "当前系统状态"
+    echo ""
+    
+    echo "═══════════════════════════════════════════════"
+    print_info "1. 服务状态:"
+    echo "----------------------------------------"
+    
+    # cloudflared 状态
+    if systemctl is-active --quiet cloudflared 2>/dev/null; then
+        print_success "✓ cloudflared: 运行中"
+    elif systemctl is-enabled --quiet cloudflared 2>/dev/null; then
+        print_warning "○ cloudflared: 已启用但未运行"
+    else
+        print_error "✗ cloudflared: 未安装或未启用"
+    fi
+    
+    # x-ui 状态
+    if systemctl is-active --quiet x-ui 2>/dev/null; then
+        print_success "✓ x-ui: 运行中"
+    elif systemctl is-enabled --quiet x-ui 2>/dev/null; then
+        print_warning "○ x-ui: 已启用但未运行"
+    else
+        print_error "✗ x-ui: 未安装或未启用"
+    fi
+    
+    echo ""
+    print_info "2. 文件状态:"
+    echo "----------------------------------------"
+    
+    # 检查关键文件
+    local files=(
+        "$BIN_DIR/cloudflared"
+        "$CONFIG_DIR/config.yml"
+        "$CERT_DIR/*.json"
+        "/etc/systemd/system/cloudflared.service"
+    )
+    
+    for file in "${files[@]}"; do
+        if ls $file 2>/dev/null | grep -q .; then
+            print_success "✓ $file: 存在"
+        else
+            print_error "✗ $file: 不存在"
+        fi
+    done
+    
+    echo ""
+    print_info "3. 证书状态:"
+    echo "----------------------------------------"
+    
+    if [ -d "$CERT_DIR" ]; then
+        local cert_count=$(ls "$CERT_DIR"/*.json 2>/dev/null | wc -l)
+        if [ "$cert_count" -gt 0 ]; then
+            print_success "✓ 找到 $cert_count 个证书文件"
+            echo "证书文件:"
+            ls "$CERT_DIR"/*.json 2>/dev/null | head -3
+        else
+            print_error "✗ 证书目录存在但无证书文件"
+        fi
+    else
+        print_error "✗ 证书目录不存在"
+    fi
+    
+    echo ""
+    print_info "4. 网络状态:"
+    echo "----------------------------------------"
+    
+    # 检查端口
+    local ports=("$PANEL_PORT" "80" "443")
+    for port in "${ports[@]}"; do
+        if ss -tulpn | grep -q ":$port "; then
+            print_success "✓ 端口 $port: 被占用"
+        else
+            print_warning "○ 端口 $port: 空闲"
+        fi
+    done
+    
+    echo ""
+    print_info "5. 配置文件内容:"
+    echo "----------------------------------------"
+    
+    if [ -f "$CONFIG_DIR/config.yml" ]; then
+        echo "配置文件: $CONFIG_DIR/config.yml"
+        grep -E "(tunnel:|hostname:|path:|service:)" "$CONFIG_DIR/config.yml" | head -10
+    else
+        print_error "配置文件不存在"
+    fi
+    
+    echo ""
+    echo "═══════════════════════════════════════════════"
+    print_input "按回车返回主菜单..."
+    read -r
+    show_menu
+}
+
+# ----------------------------
+# 改进的授权函数
+# ----------------------------
+cloudflare_auth_improved() {
+    print_step "Cloudflare 账户授权（改进版）"
+    echo ""
+    
+    # 先清理旧的
+    print_info "清理旧授权..."
+    rm -rf "$CERT_DIR" 2>/dev/null
+    sleep 1
+    
+    # 提供详细指引
+    print_info "授权指引："
+    echo "1. 如果您看到链接，请复制到浏览器打开"
+    echo "2. 登录您的 Cloudflare 账户"
+    echo "3. 选择域名: $(print_config "$USER_DOMAIN")"
+    echo "4. 点击「Authorize」或「授权」按钮"
+    echo "5. 授权成功后返回终端"
+    echo ""
+    print_warning "注意：如果看不到链接，请按 Ctrl+C 然后选择手动方案"
+    echo ""
+    print_input "准备好后按回车开始..."
+    read -r
+    
+    # 尝试授权
+    echo ""
+    echo "正在启动授权..."
+    echo "=============================================="
+    
+    local auth_output
+    if auth_output=$("$BIN_DIR/cloudflared" tunnel login 2>&1); then
+        echo "$auth_output"
+        print_success "授权命令执行成功"
+    else
+        print_warning "授权命令返回非零状态"
+        echo "输出: $auth_output"
+    fi
+    
+    echo "=============================================="
+    echo ""
+    
+    # 检查结果
+    print_info "检查授权结果..."
+    
+    local wait_time=30
+    print_info "等待 $wait_time 秒让授权完成..."
+    
+    for i in $(seq 1 $wait_time); do
+        if [ -d "$CERT_DIR" ] && [ "$(ls -A "$CERT_DIR"/*.json 2>/dev/null | wc -l)" -gt 0 ]; then
+            print_success "✅ 授权成功！找到证书文件"
+            local cert_file=$(ls -t "$CERT_DIR"/*.json | head -1)
+            print_info "证书文件: $(basename "$cert_file")"
+            return 0
+        fi
+        echo -n "."
+        sleep 1
+    done
+    
+    # 如果超时还没找到证书
+    print_error "授权超时，未找到证书文件"
+    echo ""
+    print_warning "可能的原因："
+    echo "1. 没有正确点击授权按钮"
+    echo "2. 域名不在当前Cloudflare账户"
+    echo "3. 网络问题"
+    echo ""
+    print_info "手动解决方案："
+    echo "1. 访问 https://dash.cloudflare.com/"
+    echo "2. 进入 Zero Trust → Access → Tunnels"
+    echo "3. 创建新隧道，选择「Free」计划"
+    echo "4. 按提示操作，最后会显示证书位置"
+    echo ""
+    print_input "是否继续安装？(y/N): "
+    read -r continue_install
+    if [[ ! "$continue_install" =~ ^[Yy]$ ]]; then
+        print_error "安装中止"
+        exit 1
+    fi
+    
+    return 1
+}
+
+# ----------------------------
+# 修复证书获取逻辑
+# ----------------------------
+get_tunnel_certificate() {
+    print_info "查找证书文件..."
+    
+    # 方法1：检查标准位置
+    if [ -d "$CERT_DIR" ]; then
+        local cert_files=($(ls "$CERT_DIR"/*.json 2>/dev/null))
+        if [ ${#cert_files[@]} -gt 0 ]; then
+            # 使用最新的证书文件
+            local latest_cert=$(ls -t "$CERT_DIR"/*.json | head -1)
+            TUNNEL_CERT_FILE="$latest_cert"
+            TUNNEL_ID=$(basename "$latest_cert" .json)
+            print_success "找到证书: $TUNNEL_ID"
+            return 0
+        fi
+    fi
+    
+    # 方法2：检查其他可能位置
+    local alt_locations=(
+        "/root/.cloudflared"
+        "/usr/local/etc/cloudflared"
+        "/etc/cloudflared"
+    )
+    
+    for location in "${alt_locations[@]}"; do
+        if [ -d "$location" ]; then
+            local certs=($(find "$location" -name "*.json" -type f 2>/dev/null))
+            if [ ${#certs[@]} -gt 0 ]; then
+                TUNNEL_CERT_FILE="${certs[0]}"
+                TUNNEL_ID=$(basename "${certs[0]}" .json)
+                print_success "在 $location 找到证书"
+                return 0
+            fi
+        fi
+    done
+    
+    # 方法3：手动创建证书（最后的手段）
+    print_warning "未找到现有证书，尝试创建新隧道..."
+    
+    # 创建隧道
+    local create_output
+    create_output=$("$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME" 2>&1)
+    echo "$create_output"
+    
+    # 从输出提取ID
+    TUNNEL_ID=$(echo "$create_output" | grep -oP '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}' | head -1)
+    
+    if [ -n "$TUNNEL_ID" ]; then
+        TUNNEL_CERT_FILE="$CERT_DIR/$TUNNEL_ID.json"
+        if [ -f "$TUNNEL_CERT_FILE" ]; then
+            print_success "隧道创建成功: $TUNNEL_ID"
+            return 0
+        fi
+    fi
+    
+    print_error "无法获取证书文件"
+    return 1
+}
+
+# ----------------------------
+# 主安装函数
+# ----------------------------
+main_install() {
+    clear
+    echo ""
+    echo "╔═══════════════════════════════════════════════╗"
+    echo "║           全新安装 Cloudflare Tunnel         ║"
+    echo "╚═══════════════════════════════════════════════╝"
+    echo ""
+    
+    # 检查系统
     if [[ $EUID -ne 0 ]]; then
         print_error "请使用 root 权限运行此脚本"
         exit 1
     fi
     
-    # 检查并安装必要工具
-    local tools=("curl" "wget" "grep" "sed")
-    local missing_tools=()
+    # 收集配置
+    collect_config_improved
     
-    for tool in "${tools[@]}"; do
-        if ! command -v "$tool" &> /dev/null; then
-            missing_tools+=("$tool")
-        fi
-    done
+    # 安装 cloudflared
+    install_cloudflared_improved
     
-    if [ ${#missing_tools[@]} -gt 0 ]; then
-        print_info "安装必要工具: ${missing_tools[*]}"
-        apt-get update -qq
-        apt-get install -y -qq "${missing_tools[@]}"
+    # 授权
+    if ! cloudflare_auth_improved; then
+        print_warning "授权存在问题，但继续安装流程..."
     fi
     
-    # 特别检查grep的PCRE支持（需要提取UUID）
-    if ! grep -qP 'test' <<< 'test' 2>/dev/null; then
-        print_info "安装支持PCRE的grep..."
-        apt-get install -y -qq grep
+    # 获取证书
+    if ! get_tunnel_certificate; then
+        print_error "无法获取证书，安装中止"
+        exit 1
     fi
     
-    print_success "系统检查完成"
+    # 配置DNS
+    setup_dns
+    
+    # 生成配置
+    generate_config
+    
+    # 安装X-UI
+    install_xui_improved
+    
+    # 创建服务
+    create_services
+    
+    # 完成
+    show_installation_complete
+    
+    print_input "按回车返回主菜单..."
+    read -r
+    show_menu
 }
 
 # ----------------------------
-# 收集配置信息
+# 改进的收集配置
 # ----------------------------
-collect_config() {
-    print_step "2. 收集配置信息"
-    echo ""
+collect_config_improved() {
+    print_step "收集配置信息"
     
     # 获取域名
     while [[ -z "$USER_DOMAIN" ]]; do
-        print_input "请输入您的域名 (例如: tunnel.yourdomain.com):"
+        print_input "请输入您的域名 (例如: tunnel.yourdomain.com): "
         read -r USER_DOMAIN
         
         if [[ -z "$USER_DOMAIN" ]]; then
-            print_error "域名不能为空！"
-        elif ! [[ "$USER_DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
-            print_error "域名格式不正确，请重新输入！"
+            print_error "域名不能为空"
+        elif [[ ! "$USER_DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+            print_error "域名格式不正确"
             USER_DOMAIN=""
         fi
     done
     
-    # 确认WebSocket路径
     echo ""
-    print_config "WebSocket 路径将固定为: $WS_PATH"
-    print_config "所有代理流量必须使用此路径"
-    print_warning "面板访问不通过Tunnel，使用服务器IP直连"
-    echo ""
-    
-    # 获取隧道名称（仅用于创建，config.yml中使用UUID）
-    print_input "请输入隧道名称 [默认: $TUNNEL_NAME]:"
-    read -r input_name
-    TUNNEL_NAME=${input_name:-$TUNNEL_NAME}
-    
-    # 获取代理端口
-    print_input "设置代理端口 [默认: $PROXY_PORT]:"
-    read -r input_port
-    PROXY_PORT=${input_port:-$PROXY_PORT}
-    
-    # 获取面板端口（仅用于本地访问）
-    print_input "设置X-UI面板端口 [默认: $PANEL_PORT]:"
-    read -r input_panel_port
-    PANEL_PORT=${input_panel_port:-$PANEL_PORT}
-    
-    echo ""
-    print_success "配置收集完成"
+    print_success "配置完成:"
     print_config "域名: $USER_DOMAIN"
-    print_config "隧道名称: $TUNNEL_NAME（仅用于创建）"
     print_config "WebSocket路径: $WS_PATH"
     print_config "代理端口: $PROXY_PORT"
-    print_config "面板端口: $PANEL_PORT（通过服务器IP访问）"
+    print_config "面板端口: $PANEL_PORT"
     echo ""
 }
 
 # ----------------------------
-# 安装 cloudflared
+# 改进的cloudflared安装
 # ----------------------------
-install_cloudflared() {
-    print_step "3. 安装 cloudflared"
+install_cloudflared_improved() {
+    print_step "安装 cloudflared"
+    
+    # 检查是否已安装
+    if [ -f "$BIN_DIR/cloudflared" ]; then
+        print_info "cloudflared 已安装，跳过"
+        return
+    fi
     
     local arch=$(uname -m)
     local cf_url=""
     
     case "$arch" in
-        x86_64|amd64)
-            cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
-            ;;
-        aarch64|arm64)
-            cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
-            ;;
-        *)
-            print_error "不支持的架构: $arch"
-            exit 1
-            ;;
+        x86_64|amd64) cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" ;;
+        aarch64|arm64) cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64" ;;
+        *) print_error "不支持的架构: $arch"; exit 1 ;;
     esac
     
     print_info "下载 cloudflared..."
-    if curl -sSL -o /tmp/cloudflared "$cf_url"; then
+    if curl -fsSL -o /tmp/cloudflared "$cf_url"; then
         mv /tmp/cloudflared "$BIN_DIR/cloudflared"
         chmod +x "$BIN_DIR/cloudflared"
         
-        # 验证安装
+        # 验证
         if "$BIN_DIR/cloudflared" --version &>/dev/null; then
-            local version=$("$BIN_DIR/cloudflared" --version 2>/dev/null | head -1 || echo "未知")
-            print_success "cloudflared 安装成功 (版本: $version)"
+            print_success "安装成功"
         else
-            print_error "cloudflared 安装验证失败"
-            exit 1
+            print_error "安装验证失败"
         fi
     else
-        print_error "cloudflared 下载失败"
+        print_error "下载失败"
         exit 1
     fi
 }
 
 # ----------------------------
-# Cloudflare 授权
+# 配置DNS
 # ----------------------------
-cloudflare_auth() {
-    print_step "4. Cloudflare 账户授权"
-    echo ""
+setup_dns() {
+    print_step "配置DNS路由"
     
-    print_info "授权步骤："
-    echo "1. 复制下方链接到浏览器"
-    echo "2. 登录 Cloudflare 账户"
-    echo "3. 选择域名: $(print_config "$USER_DOMAIN")"
-    echo "4. 点击「授权」"
-    echo "5. 返回终端按回车"
-    echo ""
-    print_input "按回车开始授权..."
-    read -r
+    print_info "设置 DNS 记录: $USER_DOMAIN → $TUNNEL_NAME"
     
-    # 清理旧证书
-    rm -rf /root/.cloudflared 2>/dev/null || true
-    
-    # 运行授权
-    echo ""
-    echo "=============================================="
-    print_config "授权链接："
-    echo ""
-    if ! "$BIN_DIR/cloudflared" tunnel login; then
-        print_error "授权失败，请检查网络和账户"
-        exit 1
-    fi
-    echo ""
-    echo "=============================================="
-    
-    print_input "授权完成后按回车继续..."
-    read -r
-    
-    # 验证授权
-    if [ -d "/root/.cloudflared" ] && [ "$(ls -A /root/.cloudflared/*.json 2>/dev/null | wc -l)" -gt 0 ]; then
-        print_success "Cloudflare 授权成功"
+    if "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN" 2>&1; then
+        print_success "DNS配置成功"
     else
-        print_error "授权失败，未找到证书文件"
-        exit 1
+        print_warning "DNS配置可能失败，但继续安装"
     fi
+    
+    echo ""
 }
 
 # ----------------------------
-# 创建隧道并正确获取Tunnel ID
+# 生成配置文件
 # ----------------------------
-create_tunnel() {
-    print_step "5. 创建 Cloudflare 隧道（关键步骤）"
+generate_config() {
+    print_step "生成配置文件"
     
-    # 删除可能存在的旧隧道（同名）
-    print_info "清理旧隧道（如果存在）..."
-    "$BIN_DIR/cloudflared" tunnel delete "$TUNNEL_NAME" 2>/dev/null || true
-    sleep 2
-    
-    # 创建新隧道并捕获输出
-    print_info "创建隧道: $TUNNEL_NAME"
-    echo "----------------------------------------"
-    
-    # 运行创建命令并捕获所有输出
-    local create_output
-    if ! create_output=$("$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME" 2>&1); then
-        print_error "隧道创建命令执行失败"
-        echo "错误输出:"
-        echo "$create_output"
-        exit 1
-    fi
-    
-    echo "$create_output"
-    echo "----------------------------------------"
-    
-    # 关键：从输出中提取Tunnel ID（UUID格式）
-    print_info "从创建输出中提取Tunnel ID..."
-    
-    # 方法1：从标准输出格式提取
-    TUNNEL_ID=$(echo "$create_output" | grep -oP '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}' | head -1)
-    
-    # 方法2：如果方法1失败，尝试从证书文件获取
-    if [ -z "$TUNNEL_ID" ]; then
-        print_warning "从输出提取ID失败，尝试从证书文件获取..."
-        local cert_file=$(ls -t /root/.cloudflared/*.json 2>/dev/null | head -1)
-        if [ -n "$cert_file" ]; then
-            TUNNEL_ID=$(basename "$cert_file" .json)
-            print_info "从证书文件获取ID: $TUNNEL_ID"
-        fi
-    fi
-    
-    # 验证Tunnel ID格式
-    if [[ -z "$TUNNEL_ID" ]] || [[ ! "$TUNNEL_ID" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]]; then
-        print_error "无法获取有效的Tunnel ID"
-        print_error "请手动检查: ls /root/.cloudflared/*.json"
-        exit 1
-    fi
-    
-    print_success "隧道创建成功"
-    print_critical "Tunnel ID (UUID): $TUNNEL_ID"
-    print_critical "⚠️  config.yml中将使用此ID，不是名称 '$TUNNEL_NAME'"
-    
-    # 配置DNS路由
-    print_info "配置DNS路由: $USER_DOMAIN → $TUNNEL_NAME"
-    if "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN"; then
-        print_success "DNS路由配置成功"
-    else
-        print_error "DNS路由配置失败"
-        exit 1
-    fi
-    
-    # 验证证书文件存在
-    TUNNEL_CERT_FILE="/root/.cloudflared/$TUNNEL_ID.json"
-    if [ ! -f "$TUNNEL_CERT_FILE" ]; then
-        print_error "找不到隧道证书文件: $TUNNEL_CERT_FILE"
-        print_info "现有证书文件:"
-        ls -la /root/.cloudflared/*.json 2>/dev/null || echo "无"
-        exit 1
-    fi
-    
-    print_success "证书文件验证: $TUNNEL_CERT_FILE"
-    
-    # 创建配置目录
     mkdir -p "$CONFIG_DIR" "$LOG_DIR"
-}
-
-# ----------------------------
-# 生成正确的 Ingress 配置（关键！使用Tunnel ID）
-# ----------------------------
-generate_ingress_config() {
-    print_step "6. 生成 Ingress 配置（使用Tunnel ID）"
     
-    print_critical "config.yml 关键字段:"
-    print_critical "  tunnel: $TUNNEL_ID (UUID，不是名称)"
-    print_critical "  credentials-file: $TUNNEL_CERT_FILE"
-    echo ""
-    
-    # 正确配置：只处理代理流量，其他所有404
-    local ingress_config="# ============================================
-# Cloudflare Tunnel 配置文件
+    cat > "$CONFIG_DIR/config.yml" << EOF
+# Cloudflare Tunnel 配置
 # 生成时间: $(date)
-# 架构：Tunnel只处理代理流量，面板通过IP直连
-# ============================================
 
-# 关键：必须使用Tunnel ID（UUID），不是名称
 tunnel: $TUNNEL_ID
 credentials-file: $TUNNEL_CERT_FILE
 
-# ============================================
-# Ingress 规则（第一个匹配即停止）
-# ============================================
 ingress:
-  # 规则1: WebSocket 代理流量（精确路径匹配）
-  # 只有 $WS_PATH 路径的流量会进入代理端口
+  # 代理流量
   - hostname: $USER_DOMAIN
     path: $WS_PATH
     service: http://127.0.0.1:$PROXY_PORT
-
-  # 规则2: 其他所有流量返回404（包括面板访问）
-  # 面板通过服务器IP:端口直连访问，不经过Tunnel
-  - service: http_status:404"
-
-    echo "$ingress_config" > "$CONFIG_DIR/config.yml"
+  
+  # 其他所有流量返回404
+  - service: http_status:404
+EOF
     
-    print_success "Ingress 配置已生成"
-    echo ""
-    print_config "规则1: $USER_DOMAIN$WS_PATH → 127.0.0.1:$PROXY_PORT (仅代理流量)"
-    print_config "规则2: 其他所有请求 → 404（面板不通过Tunnel）"
-    echo ""
-    print_warning "X-UI面板访问方式: http://服务器IP:$PANEL_PORT"
-    print_warning "面板不通过Tunnel，确保防火墙允许该端口"
-    
-    # 显示配置文件内容
-    print_info "配置文件预览:"
-    echo "----------------------------------------"
-    cat "$CONFIG_DIR/config.yml"
-    echo "----------------------------------------"
+    print_success "配置文件已生成: $CONFIG_DIR/config.yml"
 }
 
 # ----------------------------
-# 安装 X-UI 面板
+# 改进的X-UI安装
 # ----------------------------
-install_xui() {
-    print_step "7. 安装 X-UI 面板（本地服务）"
+install_xui_improved() {
+    print_step "安装 X-UI 面板"
     
-    print_info "下载并安装 X-UI..."
+    # 检查是否已安装
+    if systemctl is-active --quiet x-ui 2>/dev/null; then
+        print_info "X-UI 已安装，跳过"
+        return
+    fi
     
-    # 使用官方安装脚本
-    if bash <(curl -sSL https://raw.githubusercontent.com/vaxilu/x-ui/master/install.sh); then
+    print_info "下载安装脚本..."
+    if bash <(curl -fsSL https://raw.githubusercontent.com/vaxilu/x-ui/master/install.sh); then
         print_success "X-UI 安装成功"
+        
+        # 修改端口（如果需要）
+        if [ "$PANEL_PORT" != "54321" ]; then
+            print_info "修改面板端口为: $PANEL_PORT"
+            sed -i "s/54321/$PANEL_PORT/g" /etc/x-ui/x-ui.db 2>/dev/null || true
+            systemctl restart x-ui 2>/dev/null
+        fi
     else
         print_error "X-UI 安装失败"
         print_info "请手动安装: bash <(curl -Ls https://raw.githubusercontent.com/vaxilu/x-ui/master/install.sh)"
-        exit 1
     fi
-    
-    # 如果用户指定了非默认端口，修改X-UI配置
-    if [ "$PANEL_PORT" != "54321" ]; then
-        print_info "修改X-UI面板端口为: $PANEL_PORT"
-        
-        # 尝试修改配置
-        local config_files=(
-            "/etc/x-ui/x-ui.db"
-            "/usr/local/x-ui/bin/config.db"
-            "/root/x-ui/x-ui.db"
-        )
-        
-        local modified=false
-        for config_file in "${config_files[@]}"; do
-            if [ -f "$config_file" ]; then
-                if grep -q "port" "$config_file"; then
-                    # 尝试JSON格式
-                    if sed -i 's/\"port\":.*[0-9]\+/\"port\": '"$PANEL_PORT"'/' "$config_file" 2>/dev/null; then
-                        modified=true
-                    # 尝试其他格式
-                    elif sed -i "s/port.*/port: $PANEL_PORT/" "$config_file" 2>/dev/null; then
-                        modified=true
-                    fi
-                fi
-            fi
-        done
-        
-        if [ "$modified" = true ]; then
-            print_info "面板端口已修改为 $PANEL_PORT"
-        fi
-        
-        # 重启X-UI使新端口生效
-        systemctl restart x-ui 2>/dev/null || true
-        sleep 3
-    fi
-    
-    # 等待X-UI完全启动
-    print_info "等待X-UI服务启动..."
-    for i in {1..10}; do
-        if systemctl is-active --quiet x-ui; then
-            print_success "X-UI 服务运行正常 (端口: $PANEL_PORT)"
-            break
-        fi
-        sleep 1
-        if [ $i -eq 10 ]; then
-            print_warning "X-UI 启动较慢，请稍后检查: systemctl status x-ui"
-        fi
-    done
 }
 
 # ----------------------------
-# 创建 cloudflared 系统服务
+# 创建服务
 # ----------------------------
-create_cloudflared_service() {
-    print_step "8. 创建 cloudflared 系统服务"
+create_services() {
+    print_step "创建系统服务"
     
-    # 创建服务文件
+    # cloudflared 服务
     cat > /etc/systemd/system/cloudflared.service << EOF
 [Unit]
-Description=Cloudflare Tunnel (Proxy Only)
-After=network.target network-online.target
+Description=Cloudflare Tunnel
+After=network.target
 Wants=network-online.target
-Documentation=https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
 
 [Service]
 Type=simple
 User=root
 ExecStart=$BIN_DIR/cloudflared tunnel --config $CONFIG_DIR/config.yml run
-ExecStop=/bin/kill -s TERM \$MAINPID
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:$LOG_DIR/cloudflared.log
 StandardError=append:$LOG_DIR/cloudflared-error.log
-Environment="GODEBUG=netdns=go"
-LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
 EOF
     
-    # 启用服务
     systemctl daemon-reload
     systemctl enable cloudflared
+    systemctl start cloudflared
     
-    print_info "启动 cloudflared 服务..."
-    if systemctl start cloudflared; then
-        sleep 5
-        
-        if systemctl is-active --quiet cloudflared; then
-            print_success "cloudflared 服务启动成功"
-            
-            # 显示隧道状态
-            print_info "隧道状态检查:"
-            if timeout 10 "$BIN_DIR/cloudflared" tunnel info "$TUNNEL_ID" 2>/dev/null; then
-                print_success "隧道连接正常"
-            else
-                print_warning "隧道状态检查超时，但服务正在运行"
-            fi
-        else
-            print_error "cloudflared 服务启动失败"
-            print_info "查看日志: journalctl -u cloudflared -n 20 --no-pager"
-        fi
-    else
-        print_error "启动命令执行失败"
-    fi
+    print_success "服务创建完成"
 }
 
 # ----------------------------
-# 生成最终配置指南
+# 显示安装完成
 # ----------------------------
-generate_config_guide() {
-    print_step "9. 生成最终配置指南"
-    
-    # 获取服务器IP
-    local server_ip
-    server_ip=$(curl -s4 ifconfig.me 2>/dev/null || curl -s6 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}' | head -1)
-    
-    # 生成示例UUID
-    local example_uuid
-    if command -v uuidgen &> /dev/null; then
-        example_uuid=$(uuidgen)
-    else
-        example_uuid="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-    fi
-    
-    # 创建详细的配置指南
-    cat > "$CONFIG_DIR/final_setup_guide.txt" << EOF
-====================================================
-Cloudflare Tunnel + X-UI 最终配置指南
-====================================================
-安装完成时间: $(date)
-服务器IP: $server_ip
-域名: $USER_DOMAIN
-隧道ID: $TUNNEL_ID
-隧道名称: $TUNNEL_NAME
-
-🎯 最终架构说明
-====================================================
-┌─────────────────┐    ┌─────────────────┐
-│    客户端       │    │     管理员      │
-│   (公网访问)    │    │   (直接访问)    │
-└────────┬────────┘    └────────┬────────┘
-         │                       │
-         ▼                       ▼
-┌─────────────────┐    ┌─────────────────┐
-│  Cloudflare     │    │  服务器防火墙    │
-│    Tunnel       │    │   (端口$PANEL_PORT) │
-└────────┬────────┘    └────────┬────────┘
-         │                       │
-         ▼                       ▼
-┌─────────────────┐    ┌─────────────────┐
-│  Xray 代理      │    │   X-UI 面板     │
-│  (端口:$PROXY_PORT) │    │ (端口:$PANEL_PORT) │
-└─────────────────┘    └─────────────────┘
-
-📡 Tunnel 流量规则（唯一路径）
-====================================================
-只有以下路径通过Tunnel：
-$USER_DOMAIN$WS_PATH → 代理端口 $PROXY_PORT
-
-其他所有请求（包括面板访问）→ 404
-面板不通过Tunnel暴露！
-
-⚙️ X-UI 面板配置步骤
-====================================================
-1. 访问面板（不通过Tunnel）：
-   URL: http://$server_ip:$PANEL_PORT
-   或: http://服务器公网IP:$PANEL_PORT
-   用户名: admin
-   密码: admin
-
-2. 添加入站规则（必须一致）：
-   点击「入站列表」→「添加入站」
-   
-   ▽ 基本设置
-       备注: CF-Tunnel-Proxy
-       端口: $PROXY_PORT
-       协议: VLESS (推荐)
-   
-   ▽ 用户设置
-       用户ID: [点击「重置UUID」生成]
-       示例: $example_uuid
-   
-   ▽ 传输设置
-       传输协议: WebSocket
-       WebSocket 设置:
-          路径 (path): $WS_PATH
-          Host: $USER_DOMAIN
-   
-   ▽ TLS 设置
-       安全类型: 无 (TLS由Cloudflare处理)
-       ⚠️ 必须关闭TLS
-
-3. 保存并启用入站。
-
-🔗 客户端配置（关键参数）
-====================================================
-地址 (address): $USER_DOMAIN
-端口 (port): 443
-用户ID (id): [使用X-UI中生成的UUID]
-加密 (encryption): none
-传输协议 (network): ws
-路径 (path): $WS_PATH
-TLS: 开启 (必须)
-SNI: $USER_DOMAIN
-跳过证书验证: false
-
-VLESS 分享链接格式：
-vless://[UUID]@$USER_DOMAIN:443?type=ws&security=tls&encryption=none&host=$USER_DOMAIN&path=$(echo "$WS_PATH" | sed 's/\//%2F/g')&sni=$USER_DOMAIN#CF-Tunnel-Proxy
-
-🔒 安全加固建议（重要！）
-====================================================
-1. 修改X-UI默认密码：
-   登录面板 → 面板设置 → 修改用户名密码
-
-2. 防火墙设置（推荐）：
-   # 允许面板端口（限制IP范围）
-   ufw allow from 你的IP to any port $PANEL_PORT
-   
-   # 或使用iptables
-   iptables -A INPUT -p tcp --dport $PANEL_PORT -s 你的IP -j ACCEPT
-   iptables -A INPUT -p tcp --dport $PANEL_PORT -j DROP
-
-3. 安装Fail2ban：
-   apt-get install fail2ban
-   systemctl enable fail2ban
-
-4. 定期更新：
-   apt-get update && apt-get upgrade
-
-⚠️ 重要提醒
-====================================================
-1. 路径必须完全一致：
-   客户端路径: $WS_PATH
-   X-UI入站路径: $WS_PATH
-   Ingress规则路径: $WS_PATH
-
-2. TLS位置正确：
-   客户端→Cloudflare: 有TLS (443端口)
-   Cloudflare→Xray: 无TLS
-
-3. 面板访问方式：
-   通过 http://$server_ip:$PANEL_PORT
-   不通过 $USER_DOMAIN
-
-4. DNS生效时间：
-   首次使用可能需要等待DNS传播（通常1-10分钟）
-
-📊 服务管理命令
-====================================================
-# 查看服务状态
-systemctl status cloudflared
-systemctl status x-ui
-
-# 查看日志
-tail -f $LOG_DIR/cloudflared.log
-journalctl -u x-ui -f
-
-# 重启服务
-systemctl restart cloudflared
-systemctl restart x-ui
-
-# 查看隧道状态
-$BIN_DIR/cloudflared tunnel list
-$BIN_DIR/cloudflared tunnel info $TUNNEL_ID
-
-🔍 故障排查
-====================================================
-1. 面板无法访问？
-   - 检查: systemctl status x-ui
-   - 检查防火墙: ufw status 或 iptables -L
-   - 直接测试: curl http://127.0.0.1:$PANEL_PORT
-
-2. 客户端连接失败？
-   - 检查Tunnel: tail -f $LOG_DIR/cloudflared.log
-   - 验证路径一致性
-   - 检查X-UI入站是否启用
-
-3. 隧道断开？
-   - 重启: systemctl restart cloudflared
-   - 查看详细日志: journalctl -u cloudflared -n 50
-
-📁 配置文件位置
-====================================================
-Tunnel 配置: $CONFIG_DIR/config.yml
-隧道证书: $TUNNEL_CERT_FILE
-服务日志: $LOG_DIR/
-本指南: $CONFIG_DIR/final_setup_guide.txt
-X-UI配置: /etc/x-ui/x-ui.db
-
-====================================================
-配置完成！架构分离，安全可靠。
-====================================================
-EOF
-    
-    print_success "最终配置指南已生成: $CONFIG_DIR/final_setup_guide.txt"
-    echo ""
-}
-
-# ----------------------------
-# 验证安装
-# ----------------------------
-verify_installation() {
-    print_step "10. 最终验证"
-    
-    echo ""
-    print_info "🔍 安装结果验证:"
-    echo "----------------------------------------"
-    
-    local all_ok=true
-    
-    # 1. 验证Tunnel ID使用正确
-    if grep -q "tunnel: $TUNNEL_ID" "$CONFIG_DIR/config.yml"; then
-        print_success "✓ config.yml使用正确的Tunnel ID"
-    else
-        print_error "✗ config.yml未使用正确的Tunnel ID"
-        all_ok=false
-    fi
-    
-    # 2. 验证服务状态
-    if systemctl is-active --quiet cloudflared; then
-        print_success "✓ cloudflared 服务运行中"
-    else
-        print_error "✗ cloudflared 服务未运行"
-        all_ok=false
-    fi
-    
-    if systemctl is-active --quiet x-ui; then
-        print_success "✓ X-UI 服务运行中"
-    else
-        print_warning "⚠ X-UI 服务未运行（可能需要手动启动）"
-    fi
-    
-    # 3. 验证配置文件存在
-    if [ -f "$CONFIG_DIR/config.yml" ]; then
-        print_success "✓ 配置文件存在"
-    else
-        print_error "✗ 配置文件缺失"
-        all_ok=false
-    fi
-    
-    if [ -f "$TUNNEL_CERT_FILE" ]; then
-        print_success "✓ 隧道证书存在"
-    else
-        print_error "✗ 隧道证书缺失"
-        all_ok=false
-    fi
-    
-    # 4. 验证Ingress规则正确
-    if grep -q "path: $WS_PATH" "$CONFIG_DIR/config.yml"; then
-        print_success "✓ Ingress规则正确（路径: $WS_PATH）"
-    else
-        print_error "✗ Ingress规则中未找到正确路径"
-        all_ok=false
-    fi
-    
-    # 5. 验证没有面板暴露
-    if ! grep -q ": $PANEL_PORT" "$CONFIG_DIR/config.yml"; then
-        print_success "✓ 面板未通过Tunnel暴露（正确）"
-    else
-        print_error "✗ 面板在Tunnel中暴露（错误）"
-        all_ok=false
-    fi
-    
-    echo "----------------------------------------"
-    
-    if [ "$all_ok" = true ]; then
-        print_success "✅ 所有核心验证通过！架构正确实现。"
-    else
-        print_warning "⚠️ 部分验证未通过，请检查上述问题"
-    fi
-    
-    # 显示访问信息
-    local server_ip=$(curl -s4 ifconfig.me 2>/dev/null || curl -s6 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}' | head -1)
-    
-    echo ""
-    print_info "═══════════════════════════════════════════════"
-    print_success "           架构分离完成！"
-    print_info "═══════════════════════════════════════════════"
-    echo ""
-    print_config "🌐 代理访问（通过Tunnel）:"
-    print_config "    地址: $USER_DOMAIN"
-    print_config "    路径: $WS_PATH"
-    print_config "    端口: 443 (TLS)"
-    echo ""
-    print_config "🖥️  面板访问（IP直连）:"
-    print_config "    URL: http://$server_ip:$PANEL_PORT"
-    print_config "    账号: admin"
-    print_config "    密码: admin"
-    echo ""
-    print_config "📄 详细指南: cat $CONFIG_DIR/final_setup_guide.txt"
-    echo ""
-    print_warning "🔒 安全提醒：请立即修改面板默认密码！"
-    print_warning "             并配置防火墙限制面板端口访问"
-}
-
-# ----------------------------
-# 显示最终总结
-# ----------------------------
-show_final_summary() {
-    print_step "🎉 安装完成总结"
-    
-    echo ""
-    print_info "═══════════════════════════════════════════════"
-    print_success "      Cloudflare Tunnel 最终架构部署完成"
-    print_info "═══════════════════════════════════════════════"
-    echo ""
-    
-    print_critical "🎯 架构实现要点："
-    echo "1. ✅ Tunnel ID 正确获取和使用（非名称）"
-    echo "2. ✅ Ingress 只处理 /proxy 路径代理流量"
-    echo "3. ✅ X-UI 面板不通过Tunnel暴露（IP直连）"
-    echo "4. ✅ 零冲突、零重复、零暴露风险"
-    echo ""
-    
-    print_critical "📋 必须完成的手动步骤："
-    echo "1. 访问 http://服务器IP:$PANEL_PORT 登录面板"
-    echo "2. 修改默认账号密码"
-    echo "3. 添加入站（端口:$PROXY_PORT, 路径:$WS_PATH）"
-    echo "4. 配置防火墙限制面板端口访问"
-    echo ""
-    
-    print_critical "🔗 客户端连接信息："
-    echo "地址: $USER_DOMAIN"
-    echo "端口: 443"
-    echo "路径: $WS_PATH"
-    echo "传输: WebSocket"
-    echo "TLS: 开启（必须）"
-    echo ""
-    
-    print_input "按回车查看快速配置摘要..."
-    read -r
-    
-    # 显示快速摘要
+show_installation_complete() {
     clear
     echo ""
     echo "╔═══════════════════════════════════════════════╗"
-    echo "║           快速配置摘要（保存备用）           ║"
+    echo "║           安装完成！                         ║"
     echo "╚═══════════════════════════════════════════════╝"
     echo ""
-    echo "▸ 服务器IP: $(curl -s4 ifconfig.me 2>/dev/null || echo '请手动查看')"
-    echo "▸ 域名: $USER_DOMAIN"
-    echo "▸ Tunnel ID: $TUNNEL_ID"
-    echo ""
-    echo "▸ 面板访问:"
-    echo "  http://服务器IP:$PANEL_PORT"
-    echo "  账号: admin"
-    echo "  密码: admin"
-    echo ""
-    echo "▸ 代理配置:"
-    echo "  地址: $USER_DOMAIN"
-    echo "  端口: 443"
-    echo "  路径: $WS_PATH"
-    echo "  TLS: 开启"
-    echo ""
-    echo "▸ X-UI入站设置:"
-    echo "  端口: $PROXY_PORT"
-    echo "  协议: VLESS"
-    echo "  传输: WebSocket"
-    echo "  路径: $WS_PATH"
-    echo "  Host: $USER_DOMAIN"
-    echo "  TLS: 关闭"
-    echo ""
-    echo "▸ 配置文件: $CONFIG_DIR/final_setup_guide.txt"
-    echo ""
-    echo "═══════════════════════════════════════════════"
-    print_warning "立即修改面板密码并配置防火墙！"
-    echo "═══════════════════════════════════════════════"
-    echo ""
     
-    print_input "按回车键退出安装脚本..."
-    read -r
+    # 获取服务器IP
+    local server_ip=$(curl -s4 ifconfig.me 2>/dev/null || curl -s6 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+    
+    print_success "✅ 安装完成"
+    echo ""
+    print_info "▸ 代理配置："
+    echo "   地址: $USER_DOMAIN"
+    echo "   端口: 443"
+    echo "   路径: $WS_PATH"
+    echo "   TLS: 开启"
+    echo ""
+    print_info "▸ 面板访问："
+    echo "   URL: http://$server_ip:$PANEL_PORT"
+    echo "   账号: admin"
+    echo "   密码: admin"
+    echo ""
+    print_info "▸ 服务管理："
+    echo "   systemctl status cloudflared"
+    echo "   systemctl status x-ui"
+    echo ""
+    print_warning "⚠️  请立即修改面板默认密码！"
+    echo ""
 }
 
 # ----------------------------
-# 主函数
+# 主程序入口
 # ----------------------------
-main() {
-    show_title
-    check_system
-    collect_config
-    install_cloudflared
-    cloudflare_auth
-    create_tunnel
-    generate_ingress_config
-    install_xui
-    create_cloudflared_service
-    generate_config_guide
-    verify_installation
-    show_final_summary
-}
-
-# 运行主函数
-trap 'print_error "脚本被中断"; exit 1' INT TERM
-main "$@"
+if [ "$#" -eq 1 ]; then
+    case "$1" in
+        "install") main_install ;;
+        "uninstall") uninstall_all ;;
+        "fixauth") fix_auth_only ;;
+        "status") show_status ;;
+        *) echo "Usage: $0 {install|uninstall|fixauth|status}"; exit 1 ;;
+    esac
+else
+    show_menu
+fi
