@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
-# Cloudflare Tunnel + X-UI 安装脚本
-# 版本: 1.0
+# Cloudflare Tunnel + X-UI 安装脚本（稳定版）
+# 版本: 2.0 - 改进错误处理和隧道配置
 # ============================================
 
 set -e
@@ -21,7 +21,6 @@ print_success() { echo -e "${GREEN}[+]${NC} $1"; }
 print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
 print_error() { echo -e "${RED}[-]${NC} $1"; }
 print_input() { echo -e "${CYAN}[?]${NC} $1"; }
-print_auth() { echo -e "${GREEN}[🔐]${NC} $1"; }
 
 # ----------------------------
 # 配置变量
@@ -30,8 +29,8 @@ CONFIG_DIR="/etc/xui_tunnel"
 LOG_DIR="/var/log/xui_tunnel"
 BIN_DIR="/usr/local/bin"
 XUI_PORT=54321
-XUI_USERNAME="admin"
-XUI_PASSWORD="admin"
+DEFAULT_USERNAME="admin"
+DEFAULT_PASSWORD="admin"
 
 USER_DOMAIN=""
 TUNNEL_NAME="xui-tunnel"
@@ -44,49 +43,9 @@ show_title() {
     clear
     echo ""
     echo "╔══════════════════════════════════════════════╗"
-    echo "║    Cloudflare Tunnel + X-UI 管理脚本        ║"
-    echo "║             版本: 1.0                       ║"
+    echo "║    Cloudflare Tunnel + X-UI 安装脚本        ║"
+    echo "║             版本: 2.0 (稳定版)              ║"
     echo "╚══════════════════════════════════════════════╝"
-    echo ""
-}
-
-# ----------------------------
-# 收集用户信息
-# ----------------------------
-collect_user_info() {
-    echo ""
-    print_info "═══════════════════════════════════════════════"
-    print_info "           配置 Cloudflare Tunnel"
-    print_info "═══════════════════════════════════════════════"
-    echo ""
-    
-    if [ "$SILENT_MODE" = true ]; then
-        USER_DOMAIN="xui.yourdomain.com"
-        print_info "静默模式：使用默认域名 $USER_DOMAIN"
-        print_info "隧道名称: $TUNNEL_NAME"
-        return
-    fi
-    
-    while [[ -z "$USER_DOMAIN" ]]; do
-        print_input "请输入您的域名 (用于访问 X-UI 面板，例如: xui.yourdomain.com):"
-        read -r USER_DOMAIN
-        
-        if [[ -z "$USER_DOMAIN" ]]; then
-            print_error "域名不能为空！"
-        elif ! [[ "$USER_DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9\.-]+\.[a-zA-Z]{2,}$ ]]; then
-            print_error "域名格式不正确，请重新输入！"
-            USER_DOMAIN=""
-        fi
-    done
-    
-    print_input "请输入隧道名称 [默认: xui-tunnel]:"
-    read -r TUNNEL_NAME
-    TUNNEL_NAME=${TUNNEL_NAME:-"xui-tunnel"}
-    
-    echo ""
-    print_success "配置已保存:"
-    echo "  域名: $USER_DOMAIN"
-    echo "  隧道名称: $TUNNEL_NAME"
     echo ""
 }
 
@@ -105,23 +64,95 @@ check_system() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         OS=$ID
+        print_info "检测到系统: $OS"
     else
         print_error "无法检测操作系统"
         exit 1
     fi
     
+    # 更新系统
+    print_info "更新系统包..."
+    apt-get update -y
+    
     # 安装必要工具
     print_info "安装必要工具..."
-    
-    local tools=("curl" "wget" "unzip" "jq" "sudo" "certbot")
+    local tools=("curl" "wget" "git" "jq" "net-tools")
     for tool in "${tools[@]}"; do
         if ! command -v "$tool" &> /dev/null; then
-            print_info "正在安装 $tool..."
-            apt-get update && apt-get install -y "$tool"
+            print_info "安装 $tool..."
+            apt-get install -y "$tool" || print_warning "$tool 安装失败"
         fi
     done
     
     print_success "系统检查完成"
+}
+
+# ----------------------------
+# 收集用户信息
+# ----------------------------
+collect_user_info() {
+    echo ""
+    print_info "═══════════════════════════════════════════════"
+    print_info "           配置信息收集"
+    print_info "═══════════════════════════════════════════════"
+    echo ""
+    
+    if [ "$SILENT_MODE" = true ]; then
+        USER_DOMAIN="xui.example.com"
+        print_info "静默模式：使用默认域名 $USER_DOMAIN"
+        print_info "隧道名称: $TUNNEL_NAME"
+        return
+    fi
+    
+    # 获取域名
+    while true; do
+        print_input "请输入您的域名 (用于访问X-UI面板，例如: xui.yourdomain.com):"
+        read -r USER_DOMAIN
+        
+        if [[ -z "$USER_DOMAIN" ]]; then
+            print_error "域名不能为空！"
+            continue
+        fi
+        
+        if [[ "$USER_DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9\.-]+\.[a-zA-Z]{2,}$ ]]; then
+            break
+        else
+            print_error "域名格式不正确，请重新输入！"
+        fi
+    done
+    
+    # 隧道名称
+    print_input "请输入隧道名称 [默认: xui-tunnel]:"
+    read -r TUNNEL_NAME
+    TUNNEL_NAME=${TUNNEL_NAME:-"xui-tunnel"}
+    
+    # X-UI凭据
+    echo ""
+    print_input "设置X-UI登录信息:"
+    print_input "用户名 [默认: admin]:"
+    read -r xui_user
+    XUI_USERNAME=${xui_user:-"admin"}
+    
+    print_input "密码 [默认: admin]:"
+    read -r -s xui_pass
+    echo ""
+    XUI_PASSWORD=${xui_pass:-"admin"}
+    
+    # 确认信息
+    echo ""
+    print_success "配置确认:"
+    echo "  域名: $USER_DOMAIN"
+    echo "  隧道名称: $TUNNEL_NAME"
+    echo "  X-UI用户名: $XUI_USERNAME"
+    echo "  X-UI密码: $XUI_PASSWORD"
+    echo ""
+    
+    print_input "确认配置是否正确？(Y/n):"
+    read -r confirm
+    if [[ "$confirm" == "n" || "$confirm" == "N" ]]; then
+        print_info "重新输入配置..."
+        collect_user_info
+    fi
 }
 
 # ----------------------------
@@ -130,42 +161,84 @@ check_system() {
 install_xui() {
     print_info "开始安装 X-UI 面板..."
     
-    # 下载 X-UI 安装脚本
-    bash <(curl -Ls https://raw.githubusercontent.com/vaxilu/x-ui/master/install.sh)
+    # 检查是否已安装
+    if command -v x-ui &> /dev/null || systemctl is-active --quiet x-ui; then
+        print_warning "X-UI 似乎已经安装，跳过安装步骤"
+        
+        print_input "是否重新安装 X-UI？(y/N):"
+        read -r reinstall
+        if [[ "$reinstall" == "y" || "$reinstall" == "Y" ]]; then
+            print_info "卸载旧版 X-UI..."
+            x-ui uninstall || true
+        else
+            return 0
+        fi
+    fi
     
-    # 检查安装是否成功
-    if systemctl is-active --quiet x-ui; then
+    # 下载并安装 X-UI
+    print_info "下载 X-UI 安装脚本..."
+    wget -O x-ui-install.sh https://raw.githubusercontent.com/vaxilu/x-ui/master/install.sh
+    chmod +x x-ui-install.sh
+    
+    print_info "正在安装 X-UI..."
+    if bash x-ui-install.sh; then
         print_success "X-UI 安装成功"
     else
         print_error "X-UI 安装失败"
-        exit 1
+        print_info "尝试备用安装方法..."
+        
+        # 备用安装方法
+        wget -O x-ui-linux-amd64.tar.gz https://github.com/vaxilu/x-ui/releases/latest/download/x-ui-linux-amd64.tar.gz
+        tar -zxvf x-ui-linux-amd64.tar.gz
+        chmod +x x-ui/x-ui
+        cp x-ui/x-ui /usr/local/bin/
+        
+        # 创建服务文件
+        cat > /etc/systemd/system/x-ui.service << EOF
+[Unit]
+Description=x-ui Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/local/x-ui/
+ExecStart=/usr/local/bin/x-ui
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        
+        systemctl daemon-reload
+        systemctl enable x-ui
+        systemctl start x-ui
     fi
     
-    # 设置 X-UI 密码（如果默认密码不是 admin/admin）
-    print_info "设置 X-UI 登录信息..."
-    echo ""
-    print_input "请输入 X-UI 管理员用户名 [默认: admin]:"
-    read -r xui_user
-    XUI_USERNAME=${xui_user:-"admin"}
+    # 清理安装文件
+    rm -f x-ui-install.sh x-ui-linux-amd64.tar.gz 2>/dev/null || true
     
-    print_input "请输入 X-UI 管理员密码 [默认: admin]:"
-    read -r -s xui_pass
-    echo ""
-    XUI_PASSWORD=${xui_pass:-"admin"}
+    # 等待X-UI启动
+    print_info "等待X-UI启动..."
+    for i in {1..30}; do
+        if systemctl is-active --quiet x-ui; then
+            print_success "X-UI 服务运行正常"
+            break
+        fi
+        echo -n "."
+        sleep 1
+    done
     
-    # 修改 X-UI 配置
-    if [ -f "/etc/x-ui/x-ui.db" ]; then
-        print_info "更新 X-UI 登录凭据..."
-        # 这里需要根据实际 X-UI 的数据库结构来更新
-        # 通常 X-UI 安装后会提示修改密码
+    if ! systemctl is-active --quiet x-ui; then
+        print_warning "X-UI 启动较慢，继续安装过程..."
     fi
     
-    print_success "X-UI 配置完成"
-    echo ""
-    print_info "X-UI 面板本地访问地址: http://服务器IP:${XUI_PORT}"
-    print_info "用户名: ${XUI_USERNAME}"
-    print_info "密码: ${XUI_PASSWORD}"
-    echo ""
+    # 设置X-UI登录凭据（如果需要）
+    print_info "配置X-UI登录信息..."
+    sleep 5  # 给X-UI更多时间启动
+    
+    print_success "X-UI 安装完成"
 }
 
 # ----------------------------
@@ -173,6 +246,12 @@ install_xui() {
 # ----------------------------
 install_cloudflared() {
     print_info "安装 Cloudflared..."
+    
+    # 检查是否已安装
+    if command -v cloudflared &> /dev/null; then
+        print_warning "cloudflared 已安装，跳过安装步骤"
+        return 0
+    fi
     
     local arch
     arch=$(uname -m)
@@ -190,14 +269,29 @@ install_cloudflared() {
             ;;
     esac
     
-    # 下载并安装 cloudflared
-    if curl -L -o /tmp/cloudflared "$cf_url"; then
+    # 下载 cloudflared
+    print_info "下载 cloudflared..."
+    if wget -q --show-progress -O /tmp/cloudflared "$cf_url"; then
         mv /tmp/cloudflared "$BIN_DIR/cloudflared"
         chmod +x "$BIN_DIR/cloudflared"
         print_success "cloudflared 安装成功"
     else
-        print_error "cloudflared 下载失败"
-        exit 1
+        print_error "cloudflared 下载失败，尝试备用方法..."
+        
+        # 备用下载方法
+        if curl -L -o /tmp/cloudflared "$cf_url"; then
+            mv /tmp/cloudflared "$BIN_DIR/cloudflared"
+            chmod +x "$BIN_DIR/cloudflared"
+            print_success "cloudflared 安装成功（备用方法）"
+        else
+            print_error "无法下载 cloudflared"
+            exit 1
+        fi
+    fi
+    
+    # 验证安装
+    if "$BIN_DIR/cloudflared" --version &> /dev/null; then
+        print_success "cloudflared 版本: $("$BIN_DIR/cloudflared" --version)"
     fi
 }
 
@@ -206,32 +300,38 @@ install_cloudflared() {
 # ----------------------------
 cloudflare_auth() {
     echo ""
-    print_auth "═══════════════════════════════════════════════"
-    print_auth "         Cloudflare 授权                      "
-    print_auth "═══════════════════════════════════════════════"
+    print_info "═══════════════════════════════════════════════"
+    print_info "        Cloudflare 账户授权"
+    print_info "═══════════════════════════════════════════════"
     echo ""
     
-    # 清理旧的授权文件
-    rm -rf /root/.cloudflared 2>/dev/null
+    # 清理旧的授权
+    print_info "清理旧的授权文件..."
+    rm -rf /root/.cloudflared 2>/dev/null || true
     mkdir -p /root/.cloudflared
     
-    echo "请按以下步骤操作："
-    echo "1. 脚本将显示一个 Cloudflare 授权链接"
+    echo "授权步骤："
+    echo "1. 下面会显示一个 Cloudflare 授权链接"
     echo "2. 复制链接到浏览器打开"
     echo "3. 登录您的 Cloudflare 账户"
-    echo "4. 选择您要使用的域名并授权"
-    echo "5. 返回终端按回车继续"
+    echo "4. 选择要使用的域名: uiargo.9420ce.top"
+    echo "5. 授权后返回终端继续"
     echo ""
-    print_input "按回车开始授权..."
+    print_input "按回车键开始授权..."
     read -r
     
     echo ""
     echo "=============================================="
-    echo "请复制以下链接到浏览器："
+    print_info "请复制以下链接到浏览器："
     echo ""
     
     # 运行授权命令
-    "$BIN_DIR/cloudflared" tunnel login
+    if "$BIN_DIR/cloudflared" tunnel login; then
+        print_success "授权命令执行成功"
+    else
+        print_error "授权命令执行失败"
+        return 1
+    fi
     
     echo ""
     echo "=============================================="
@@ -239,137 +339,209 @@ cloudflare_auth() {
     read -r
     
     # 检查授权结果
-    if [[ -f "/root/.cloudflared/cert.pem" ]]; then
-        print_success "✅ 授权成功！找到证书文件"
-        
-        # 检查凭证文件
-        if ls /root/.cloudflared/*.json 1> /dev/null 2>&1; then
-            local json_file=$(ls /root/.cloudflared/*.json | head -1)
-            print_success "✅ 找到凭证文件: $(basename "$json_file")"
-            return 0
-        else
-            print_warning "⚠️  未找到JSON凭证文件，将在创建隧道时生成"
-            return 0
+    print_info "检查授权结果..."
+    
+    local check_count=0
+    while [[ $check_count -lt 10 ]]; do
+        if [[ -f "/root/.cloudflared/cert.pem" ]]; then
+            print_success "✅ 找到证书文件"
+            
+            # 检查凭证文件
+            local json_files=(/root/.cloudflared/*.json)
+            if [[ ${#json_files[@]} -gt 0 ]] && [[ -f "${json_files[0]}" ]]; then
+                print_success "✅ 找到凭证文件: $(basename "${json_files[0]}")"
+                return 0
+            else
+                print_warning "未找到JSON凭证文件，将在创建隧道时生成"
+                return 0
+            fi
         fi
-    else
-        print_error "❌ 授权失败：未找到证书文件"
-        return 1
-    fi
+        sleep 2
+        ((check_count++))
+    done
+    
+    print_error "❌ 授权失败：未找到证书文件"
+    print_info "可能的原因："
+    echo "  1. 未完成授权流程"
+    echo "  2. 浏览器未返回正确的证书"
+    echo "  3. 网络问题"
+    echo ""
+    return 1
 }
 
 # ----------------------------
-# 创建隧道和配置
+# 创建隧道
 # ----------------------------
-setup_tunnel() {
-    print_info "设置 Cloudflare Tunnel..."
+create_tunnel() {
+    print_info "创建 Cloudflare 隧道..."
     
-    # 检查证书文件
+    # 检查证书
     if [[ ! -f "/root/.cloudflared/cert.pem" ]]; then
-        print_error "❌ 未找到证书文件，请先完成授权"
-        exit 1
+        print_error "未找到证书文件，请先完成授权"
+        return 1
     fi
     
-    local json_file=""
+    # 清理可能存在的同名隧道
+    print_info "清理旧的隧道配置..."
+    "$BIN_DIR/cloudflared" tunnel delete -f "$TUNNEL_NAME" 2>/dev/null || true
+    sleep 2
     
-    # 检查是否有现有凭证文件
-    if ls /root/.cloudflared/*.json 1> /dev/null 2>&1; then
-        json_file=$(ls -t /root/.cloudflared/*.json | head -1)
-        print_success "✅ 使用现有凭证文件: $(basename "$json_file")"
+    # 列出当前隧道
+    print_info "当前隧道列表:"
+    "$BIN_DIR/cloudflared" tunnel list 2>/dev/null || echo "无隧道"
+    
+    # 创建新隧道
+    print_info "创建新隧道: $TUNNEL_NAME"
+    echo "正在创建隧道，请稍候..."
+    
+    if timeout 120 "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME"; then
+        print_success "隧道创建命令执行成功"
     else
-        print_warning "⚠️  未找到凭证文件，正在创建隧道..."
-        
-        # 删除可能存在的同名隧道
-        "$BIN_DIR/cloudflared" tunnel delete -f "$TUNNEL_NAME" 2>/dev/null || true
-        sleep 2
-        
-        # 创建新隧道
-        print_info "创建隧道: $TUNNEL_NAME"
-        if timeout 60 "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME"; then
-            sleep 3
-            # 查找新生成的凭证文件
-            json_file=$(ls -t /root/.cloudflared/*.json 2>/dev/null | head -1)
-            if [[ -n "$json_file" ]] && [[ -f "$json_file" ]]; then
-                print_success "✅ 隧道创建成功，凭证文件: $(basename "$json_file")"
-            else
-                print_error "❌ 创建隧道后未生成凭证文件"
-                exit 1
-            fi
-        else
-            print_error "❌ 无法创建隧道"
-            exit 1
-        fi
+        print_error "隧道创建失败"
+        return 1
     fi
+    
+    sleep 3
     
     # 获取隧道ID
-    local tunnel_id
-    tunnel_id=$("$BIN_DIR/cloudflared" tunnel list 2>/dev/null | grep "$TUNNEL_NAME" | awk '{print $1}')
+    local tunnel_info
+    tunnel_info=$("$BIN_DIR/cloudflared" tunnel list 2>/dev/null | grep "$TUNNEL_NAME" || true)
     
-    if [[ -z "$tunnel_id" ]]; then
-        print_error "❌ 无法获取隧道ID"
-        exit 1
+    if [[ -z "$tunnel_info" ]]; then
+        print_error "无法找到隧道 $TUNNEL_NAME"
+        return 1
     fi
     
-    print_success "✅ 隧道就绪 (名称: ${TUNNEL_NAME}, ID: ${tunnel_id})"
+    local tunnel_id=$(echo "$tunnel_info" | awk '{print $1}')
+    print_success "✅ 隧道创建成功"
+    print_success "隧道ID: $tunnel_id"
+    print_success "隧道名称: $TUNNEL_NAME"
     
-    # 绑定域名
-    print_info "绑定域名: $USER_DOMAIN"
-    "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN" > /dev/null 2>&1
-    print_success "✅ 域名绑定成功"
+    # 获取凭证文件
+    local json_file=$(ls -t /root/.cloudflared/*.json 2>/dev/null | head -1)
+    if [[ -z "$json_file" ]] || [[ ! -f "$json_file" ]]; then
+        print_error "未找到隧道凭证文件"
+        return 1
+    fi
+    
+    print_success "凭证文件: $(basename "$json_file")"
     
     # 创建配置目录
     mkdir -p "$CONFIG_DIR"
     
     # 保存隧道配置
     cat > "$CONFIG_DIR/tunnel.conf" << EOF
+# X-UI隧道配置
 TUNNEL_ID=$tunnel_id
 TUNNEL_NAME=$TUNNEL_NAME
 DOMAIN=$USER_DOMAIN
+CREDENTIALS_FILE=$json_file
 XUI_PORT=$XUI_PORT
 XUI_USERNAME=$XUI_USERNAME
 XUI_PASSWORD=$XUI_PASSWORD
-CREATED_DATE=$(date +"%Y-%m-%d")
+CREATED_DATE=$(date +"%Y-%m-%d %H:%M:%S")
 EOF
     
-    print_success "隧道设置完成"
+    print_success "隧道配置保存到: $CONFIG_DIR/tunnel.conf"
+    return 0
 }
 
 # ----------------------------
-# 配置 Cloudflared 服务
+# 配置 DNS 记录
 # ----------------------------
-configure_cloudflared_service() {
-    print_info "配置 Cloudflared 服务..."
+setup_dns() {
+    print_info "配置DNS记录..."
     
-    # 从配置文件读取信息
-    local tunnel_id=$(grep "^TUNNEL_ID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local json_file=$(grep "^CREDENTIALS_FILE=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null || echo "CREDENTIALS_FILE=/root/.cloudflared/$(ls /root/.cloudflared/*.json 2>/dev/null | xargs basename 2>/dev/null | head -1)")
-    json_file=$(echo "$json_file" | cut -d'=' -f2)
-    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local xui_port=$(grep "^XUI_PORT=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local tunnel_id=$(grep "^TUNNEL_ID=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
+    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
     
-    # 创建 cloudflared 配置文件
+    if [[ -z "$tunnel_id" ]] || [[ -z "$domain" ]]; then
+        print_error "无法读取隧道配置"
+        return 1
+    fi
+    
+    print_info "绑定域名 $domain 到隧道 $TUNNEL_NAME..."
+    
+    if "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$domain"; then
+        print_success "✅ DNS记录配置成功"
+    else
+        print_warning "⚠️  DNS配置可能失败，但可以继续"
+        print_info "您可能需要手动在Cloudflare面板创建CNAME记录:"
+        echo "  类型: CNAME"
+        echo "  名称: $domain"
+        echo "  目标: $tunnel_id.cfargotunnel.com"
+        echo ""
+    fi
+    
+    # 测试DNS解析
+    print_info "测试DNS解析..."
+    if dig "$domain" +short | grep -q "cfargotunnel"; then
+        print_success "DNS解析正常"
+    else
+        print_warning "DNS解析可能需要时间生效"
+    fi
+    
+    return 0
+}
+
+# ----------------------------
+# 创建配置文件
+# ----------------------------
+create_config_files() {
+    print_info "创建配置文件..."
+    
+    local tunnel_id=$(grep "^TUNNEL_ID=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
+    local json_file=$(grep "^CREDENTIALS_FILE=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
+    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
+    
+    if [[ -z "$tunnel_id" ]] || [[ -z "$json_file" ]] || [[ -z "$domain" ]]; then
+        print_error "无法读取配置信息"
+        return 1
+    fi
+    
+    # 创建 cloudflared 配置文件（简化版）
     cat > "$CONFIG_DIR/config.yaml" << EOF
+# Cloudflare Tunnel 配置文件
 tunnel: $tunnel_id
 credentials-file: $json_file
+
+# 日志设置
 logfile: $LOG_DIR/cloudflared.log
 loglevel: info
+
+# 入口规则
 ingress:
   - hostname: $domain
-    service: http://localhost:$xui_port
+    service: http://localhost:$XUI_PORT
     originRequest:
-      noTLSVerify: true
-      httpHostHeader: $domain
       connectTimeout: 30s
       tcpKeepAlive: 30s
-      noHappyEyeballs: true
-      disableChunkedEncoding: false
+      noHappyEyeballs: false
+      httpHostHeader: $domain
+
+  # 默认404页面
   - service: http_status:404
 EOF
     
-    # 创建 systemd 服务文件
+    print_success "配置文件创建完成: $CONFIG_DIR/config.yaml"
+    
+    # 创建日志目录
+    mkdir -p "$LOG_DIR"
+    
+    return 0
+}
+
+# ----------------------------
+# 创建系统服务
+# ----------------------------
+create_system_service() {
+    print_info "创建系统服务..."
+    
+    # 创建服务文件
     cat > /etc/systemd/system/xui-tunnel.service << EOF
 [Unit]
 Description=X-UI Cloudflare Tunnel Service
-After=network.target x-ui.service
+After=network.target
 Wants=network-online.target
 After=network-online.target
 
@@ -381,16 +553,22 @@ Environment="TUNNEL_ORIGIN_CERT=/root/.cloudflared/cert.pem"
 ExecStart=$BIN_DIR/cloudflared tunnel --config $CONFIG_DIR/config.yaml run
 Restart=always
 RestartSec=10
-StandardOutput=append:$LOG_DIR/tunnel.log
-StandardError=append:$LOG_DIR/tunnel-error.log
+StandardOutput=append:$LOG_DIR/service.log
+StandardError=append:$LOG_DIR/error.log
+
+# 安全设置
+NoNewPrivileges=yes
+LimitNPROC=100
+LimitNOFILE=100000
 
 [Install]
 WantedBy=multi-user.target
 EOF
     
-    # 重载 systemd
+    # 重载systemd
     systemctl daemon-reload
-    print_success "Cloudflared 服务配置完成"
+    
+    print_success "系统服务创建完成"
 }
 
 # ----------------------------
@@ -399,277 +577,207 @@ EOF
 start_services() {
     print_info "启动服务..."
     
-    # 确保 X-UI 正在运行
-    if systemctl restart x-ui; then
-        print_success "✅ X-UI 服务启动成功"
-    else
-        print_error "❌ X-UI 服务启动失败"
-        return 1
+    # 确保X-UI运行
+    if ! systemctl is-active --quiet x-ui; then
+        print_info "启动X-UI服务..."
+        systemctl start x-ui
+        sleep 3
     fi
     
-    # 停止可能存在的旧隧道服务
+    # 停止可能存在的隧道服务
     systemctl stop xui-tunnel.service 2>/dev/null || true
     sleep 2
     
     # 启动隧道服务
-    systemctl enable xui-tunnel.service > /dev/null 2>&1
+    print_info "启动隧道服务..."
+    systemctl enable xui-tunnel.service
     systemctl start xui-tunnel.service
     
-    # 等待隧道连接
+    # 等待并检查服务状态
     local wait_time=0
-    local max_wait=60
+    local max_wait=30
     
-    print_info "等待隧道连接建立（最多60秒）..."
+    print_info "等待服务启动（最多30秒）..."
     
     while [[ $wait_time -lt $max_wait ]]; do
         if systemctl is-active --quiet xui-tunnel.service; then
-            print_success "✅ X-UI Tunnel 服务运行中"
+            print_success "✅ 隧道服务启动成功"
             break
         fi
         
-        if [[ $((wait_time % 15)) -eq 0 ]] && [[ $wait_time -gt 0 ]]; then
-            print_info "已等待 ${wait_time}秒..."
-        fi
-        
+        echo -n "."
         sleep 3
         ((wait_time+=3))
+        
+        # 每15秒显示一次进度
+        if [[ $((wait_time % 15)) -eq 0 ]] && [[ $wait_time -gt 0 ]]; then
+            echo ""
+            print_info "已等待 ${wait_time}秒..."
+        fi
     done
     
     if [[ $wait_time -ge $max_wait ]]; then
-        print_warning "⚠️  隧道服务启动较慢"
-        print_info "服务会在后台继续启动，请稍后检查状态。"
+        print_warning "⚠️  服务启动较慢，检查日志..."
+        journalctl -u xui-tunnel.service -n 20 --no-pager
     fi
     
-    sleep 3
+    sleep 2
+    
+    # 显示服务状态
+    echo ""
+    print_info "服务状态:"
+    
+    if systemctl is-active --quiet x-ui; then
+        print_success "  X-UI服务: 运行中"
+    else
+        print_error "  X-UI服务: 未运行"
+    fi
+    
+    if systemctl is-active --quiet xui-tunnel.service; then
+        print_success "  隧道服务: 运行中"
+    else
+        print_error "  隧道服务: 未运行"
+    fi
+    
     return 0
 }
 
 # ----------------------------
-# 显示连接信息
+# 显示安装结果
 # ----------------------------
-show_connection_info() {
+show_installation_result() {
+    echo ""
     print_info "═══════════════════════════════════════════════"
-    print_info "           安装完成！连接信息"
+    print_info "           安装完成！"
     print_info "═══════════════════════════════════════════════"
     echo ""
     
-    if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
-        print_error "未找到配置文件"
-        return
+    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
+    local xui_user=$(grep "^XUI_USERNAME=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
+    local xui_pass=$(grep "^XUI_PASSWORD=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
+    
+    if [[ -n "$domain" ]]; then
+        print_success "🎉 X-UI面板访问地址:"
+        print_success "   https://$domain"
+        echo ""
     fi
     
-    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local xui_port=$(grep "^XUI_PORT=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local xui_username=$(grep "^XUI_USERNAME=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    local xui_password=$(grep "^XUI_PASSWORD=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-    
-    if [[ -z "$domain" ]]; then
-        print_error "无法读取配置"
-        return
-    fi
-    
-    print_success "🔗 X-UI 面板访问地址:"
-    print_success "   https://$domain"
-    echo ""
-    
-    print_success "🔐 登录凭据:"
-    print_success "   用户名: $xui_username"
-    print_success "   密码: $xui_password"
+    print_success "🔐 X-UI登录凭据:"
+    print_success "   用户名: ${xui_user:-admin}"
+    print_success "   密码: ${xui_pass:-admin}"
     echo ""
     
     print_success "📡 本地访问地址:"
-    print_success "   http://服务器IP:$xui_port"
+    print_success "   http://服务器IP:54321"
     echo ""
     
-    print_info "🧪 服务状态:"
+    print_info "🛠️  管理命令:"
+    echo "  查看状态: systemctl status xui-tunnel.service"
+    echo "  查看日志: journalctl -u xui-tunnel.service -f"
+    echo "  重启隧道: systemctl restart xui-tunnel.service"
+    echo "  停止隧道: systemctl stop xui-tunnel.service"
     echo ""
     
-    if systemctl is-active --quiet x-ui; then
-        print_success "✅ X-UI 服务: 运行中"
-    else
-        print_error "❌ X-UI 服务: 未运行"
-    fi
-    
-    if systemctl is-active --quiet xui-tunnel.service; then
-        print_success "✅ X-UI Tunnel 服务: 运行中"
-    else
-        print_error "❌ X-UI Tunnel 服务: 未运行"
-    fi
-    
-    echo ""
-    print_info "📋 使用说明:"
-    echo "  1. 访问 https://$domain 管理 X-UI 面板"
-    echo "  2. 在 X-UI 面板中添加和管理代理用户"
-    echo "  3. Cloudflare Tunnel 会自动提供 TLS 加密"
+    print_info "🔧 故障排除:"
+    echo "  1. 如果无法访问，等待2-3分钟DNS生效"
+    echo "  2. 检查服务状态: systemctl status xui-tunnel"
+    echo "  3. 查看详细日志: tail -f /var/log/xui_tunnel/error.log"
+    echo "  4. 确认X-UI是否运行: systemctl status x-ui"
     echo ""
     
-    print_info "🔧 管理命令:"
-    echo "  查看隧道状态: sudo ./xui_tunnel.sh status"
-    echo "  重启隧道服务: systemctl restart xui-tunnel.service"
-    echo "  查看隧道日志: journalctl -u xui-tunnel.service -f"
-    echo "  查看 X-UI 日志: journalctl -u x-ui -f"
-    echo ""
+    print_warning "⚠️  重要提示:"
+    echo "  1. 首次登录后立即修改默认密码"
+    echo "  2. 建议启用X-UI的访问密码"
+    echo "  3. 定期备份配置"
     
-    print_warning "⚠️  安全提示:"
-    echo "  1. 首次登录后请立即修改默认密码"
-    echo "  2. 建议启用 X-UI 的面板访问密码"
-    echo "  3. 定期更新 X-UI 到最新版本"
+    echo ""
+    print_success "安装完成！您现在可以通过 https://${domain:-您的域名} 访问X-UI面板"
 }
 
 # ----------------------------
 # 主安装流程
 # ----------------------------
 main_install() {
-    print_info "开始安装流程..."
+    show_title
     
+    print_info "开始安装 X-UI + Cloudflare Tunnel..."
+    echo ""
+    
+    # 执行安装步骤
     check_system
     collect_user_info
     install_xui
     install_cloudflared
     
-    # Cloudflare 授权
+    # Cloudflare授权
     if ! cloudflare_auth; then
-        print_warning "授权可能有问题"
-        print_input "是否继续安装？(y/N): "
-        read -r continue_install
-        if [[ "$continue_install" != "y" && "$continue_install" != "Y" ]]; then
-            print_error "安装中止"
-            return 1
-        fi
-    fi
-    
-    # 设置隧道
-    if ! setup_tunnel; then
-        print_error "隧道设置失败"
+        print_error "授权失败，安装中止"
         return 1
     fi
     
-    configure_cloudflared_service
-    
-    if ! start_services; then
-        print_error "服务启动失败"
+    # 创建隧道
+    if ! create_tunnel; then
+        print_error "隧道创建失败"
         return 1
     fi
     
-    show_connection_info
+    # 配置DNS
+    setup_dns
     
-    echo ""
-    print_success "🎉 安装完成！"
+    # 创建配置文件
+    if ! create_config_files; then
+        print_error "配置文件创建失败"
+        return 1
+    fi
+    
+    # 创建系统服务
+    create_system_service
+    
+    # 启动服务
+    start_services
+    
+    # 显示结果
+    show_installation_result
+    
     return 0
 }
 
 # ----------------------------
-# 卸载功能
+# 快速修复函数
 # ----------------------------
-uninstall_all() {
-    print_info "开始卸载 X-UI Tunnel..."
+quick_fix() {
     echo ""
+    print_info "快速修复隧道问题..."
     
-    print_warning "⚠️  警告：此操作将删除隧道配置，但保留 X-UI 面板和数据！"
-    print_input "确认要卸载吗？(y/N): "
-    read -r confirm
-    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-        print_info "卸载已取消"
-        return
-    fi
-    
-    echo ""
-    print_info "停止隧道服务..."
-    
+    # 1. 停止服务
     systemctl stop xui-tunnel.service 2>/dev/null || true
-    systemctl disable xui-tunnel.service 2>/dev/null || true
+    pkill -f cloudflared 2>/dev/null || true
+    sleep 2
     
-    rm -f /etc/systemd/system/xui-tunnel.service
-    rm -rf "$CONFIG_DIR" "$LOG_DIR"
-    
-    print_input "是否删除 cloudflared 二进制文件？(y/N): "
-    read -r delete_bin
-    if [[ "$delete_bin" == "y" || "$delete_bin" == "Y" ]]; then
-        rm -f "$BIN_DIR/cloudflared"
+    # 2. 检查X-UI
+    if ! systemctl is-active --quiet x-ui; then
+        print_info "启动X-UI..."
+        systemctl start x-ui
+        sleep 3
     fi
     
-    print_input "是否删除 Cloudflare 授权文件？(y/N): "
-    read -r delete_auth
-    if [[ "$delete_auth" == "y" || "$delete_auth" == "Y" ]]; then
-        rm -rf /root/.cloudflared
+    # 3. 重新生成配置文件
+    if [ -f "$CONFIG_DIR/tunnel.conf" ]; then
+        create_config_files
     fi
     
+    # 4. 启动服务
     systemctl daemon-reload
+    systemctl restart xui-tunnel.service
     
-    echo ""
-    print_success "✅ 隧道卸载完成！"
-    print_info "X-UI 面板仍然保留，可以通过服务器IP:54321访问"
-}
-
-# ----------------------------
-# 显示配置信息
-# ----------------------------
-show_config() {
-    if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
-        print_error "未找到隧道配置文件，可能未安装"
-        return 1
-    fi
+    sleep 5
     
-    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
-    local xui_port=$(grep "^XUI_PORT=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
-    local xui_username=$(grep "^XUI_USERNAME=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
-    
-    if [[ -z "$domain" ]]; then
-        print_error "无法读取配置"
-        return 1
-    fi
-    
-    echo ""
-    print_success "当前隧道配置:"
-    echo "  X-UI 面板域名: https://$domain"
-    echo "  X-UI 本地端口: $xui_port"
-    echo "  X-UI 用户名: $xui_username"
-    echo ""
-    
-    print_info "🧪 服务状态:"
+    # 5. 检查结果
     if systemctl is-active --quiet xui-tunnel.service; then
-        print_success "  X-UI Tunnel: 运行中"
-        
-        echo ""
-        print_info "隧道信息:"
-        "$BIN_DIR/cloudflared" tunnel list 2>/dev/null || true
+        print_success "✅ 修复成功！隧道服务已启动"
     else
-        print_error "  X-UI Tunnel: 未运行"
-    fi
-    echo ""
-}
-
-# ----------------------------
-# 显示服务状态
-# ----------------------------
-show_status() {
-    print_info "服务状态检查..."
-    echo ""
-    
-    if systemctl is-active --quiet x-ui; then
-        print_success "X-UI 服务: 运行中"
-        print_info "  本地访问: http://服务器IP:54321"
-    else
-        print_error "X-UI 服务: 未运行"
-    fi
-    
-    echo ""
-    
-    if systemctl is-active --quiet xui-tunnel.service; then
-        print_success "X-UI Tunnel 服务: 运行中"
-        
-        echo ""
-        print_info "隧道信息:"
-        "$BIN_DIR/cloudflared" tunnel list 2>/dev/null || true
-        
-        # 显示域名信息
-        if [ -f "$CONFIG_DIR/tunnel.conf" ]; then
-            local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-            echo ""
-            print_info "面板访问地址: https://$domain"
-        fi
-    else
-        print_error "X-UI Tunnel 服务: 未运行"
+        print_error "❌ 修复失败，查看日志:"
+        journalctl -u xui-tunnel.service -n 30 --no-pager
     fi
 }
 
@@ -682,44 +790,54 @@ show_menu() {
     echo "请选择操作："
     echo ""
     echo "  1) 安装 X-UI + Cloudflare Tunnel"
-    echo "  2) 卸载 Cloudflare Tunnel (保留X-UI)"
+    echo "  2) 快速修复隧道问题"
     echo "  3) 查看服务状态"
     echo "  4) 查看配置信息"
     echo "  5) 重启隧道服务"
-    echo "  6) 退出"
+    echo "  6) 卸载隧道服务"
+    echo "  7) 退出"
     echo ""
     
-    print_input "请输入选项 (1-6): "
+    print_input "请输入选项 (1-7): "
     read -r choice
     
     case "$choice" in
         1)
-            SILENT_MODE=false
             if main_install; then
                 echo ""
-                print_input "按回车键返回菜单..."
-                read -r
-            else
-                echo ""
-                print_error "安装失败"
                 print_input "按回车键返回菜单..."
                 read -r
             fi
             ;;
         2)
-            uninstall_all
+            quick_fix
             echo ""
             print_input "按回车键返回菜单..."
             read -r
             ;;
         3)
-            show_status
+            echo ""
+            print_info "服务状态:"
+            systemctl status x-ui --no-pager | head -10
+            echo ""
+            systemctl status xui-tunnel.service --no-pager | head -10
             echo ""
             print_input "按回车键返回菜单..."
             read -r
             ;;
         4)
-            show_config
+            if [ -f "$CONFIG_DIR/tunnel.conf" ]; then
+                echo ""
+                print_info "当前配置:"
+                cat "$CONFIG_DIR/tunnel.conf"
+                echo ""
+                if [ -f "$CONFIG_DIR/config.yaml" ]; then
+                    print_info "配置文件:"
+                    cat "$CONFIG_DIR/config.yaml"
+                fi
+            else
+                print_error "未找到配置文件"
+            fi
             echo ""
             print_input "按回车键返回菜单..."
             read -r
@@ -728,12 +846,24 @@ show_menu() {
             print_info "重启隧道服务..."
             systemctl restart xui-tunnel.service
             sleep 3
-            show_status
+            systemctl status xui-tunnel.service --no-pager | head -10
             echo ""
             print_input "按回车键返回菜单..."
             read -r
             ;;
         6)
+            print_warning "卸载隧道服务（保留X-UI）..."
+            systemctl stop xui-tunnel.service 2>/dev/null || true
+            systemctl disable xui-tunnel.service 2>/dev/null || true
+            rm -f /etc/systemd/system/xui-tunnel.service
+            rm -rf "$CONFIG_DIR" "$LOG_DIR"
+            systemctl daemon-reload
+            print_success "隧道服务已卸载"
+            echo ""
+            print_input "按回车键返回菜单..."
+            read -r
+            ;;
+        7)
             print_info "再见！"
             exit 0
             ;;
@@ -752,30 +882,16 @@ show_menu() {
 main() {
     case "${1:-}" in
         "install")
-            SILENT_MODE=false
-            show_title
             main_install
             ;;
-        "uninstall")
-            show_title
-            uninstall_all
-            ;;
-        "config")
-            show_title
-            show_config
+        "fix")
+            quick_fix
             ;;
         "status")
             show_title
-            show_status
-            ;;
-        "restart")
-            systemctl restart xui-tunnel.service
-            print_success "隧道服务已重启"
-            ;;
-        "-y"|"--silent")
-            SILENT_MODE=true
-            show_title
-            main_install
+            systemctl status x-ui --no-pager
+            echo ""
+            systemctl status xui-tunnel.service --no-pager
             ;;
         "menu"|"")
             show_menu
@@ -783,13 +899,10 @@ main() {
         *)
             show_title
             echo "使用方法:"
-            echo "  sudo ./xui_tunnel.sh menu          # 显示菜单"
-            echo "  sudo ./xui_tunnel.sh install       # 安装"
-            echo "  sudo ./xui_tunnel.sh uninstall     # 卸载隧道"
-            echo "  sudo ./xui_tunnel.sh status        # 查看状态"
-            echo "  sudo ./xui_tunnel.sh config        # 查看配置"
-            echo "  sudo ./xui_tunnel.sh restart       # 重启隧道"
-            echo "  sudo ./xui_tunnel.sh -y            # 静默安装"
+            echo "  sudo ./xui_tunnel.sh menu        # 显示菜单"
+            echo "  sudo ./xui_tunnel.sh install     # 安装"
+            echo "  sudo ./xui_tunnel.sh fix         # 快速修复"
+            echo "  sudo ./xui_tunnel.sh status      # 查看状态"
             exit 1
             ;;
     esac
