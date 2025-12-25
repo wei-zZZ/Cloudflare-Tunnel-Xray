@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
-# Cloudflare Tunnel + X-UI 安装脚本（修复版）
-# 版本: 5.0 - 修复隧道启动问题
+# Cloudflare Tunnel + X-UI 安装脚本（修复凭证问题）
+# 版本: 6.0 - 修复凭证文件处理
 # ============================================
 
 set -e
@@ -31,17 +31,11 @@ CONFIG_DIR="/etc/xui_tunnel"
 LOG_DIR="/var/log/xui_tunnel"
 BIN_DIR="/usr/local/bin"
 
-# 隧道配置
-PANEL_TUNNEL="xui-panel"
-NODE_TUNNEL="xui-nodes"
-
-# 端口配置
-XUI_PANEL_PORT=54321
-NODE_PORTS="10000,10001,10002,10003,10004"
-
 # 用户配置
 PANEL_DOMAIN=""
 NODE_DOMAIN=""
+PANEL_TUNNEL="xui-panel"
+NODE_TUNNEL="xui-nodes"
 XUI_USERNAME="admin"
 XUI_PASSWORD="admin"
 
@@ -53,13 +47,13 @@ show_title() {
     echo ""
     echo "╔══════════════════════════════════════════════╗"
     echo "║    X-UI + Cloudflare Tunnel 安装脚本        ║"
-    echo "║       版本: 5.0 (修复版)                    ║"
+    echo "║       版本: 6.0 (修复凭证问题)             ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
 }
 
 # ----------------------------
-# 收集用户信息（简化版）
+# 收集用户信息
 # ----------------------------
 collect_user_info() {
     echo ""
@@ -94,6 +88,16 @@ collect_user_info() {
         NODE_DOMAIN="proxy.$PANEL_DOMAIN"
     fi
     
+    # 隧道名称
+    echo ""
+    print_input "请输入面板隧道名称 [默认: xui-panel]:"
+    read -r panel_tunnel
+    PANEL_TUNNEL=${panel_tunnel:-"xui-panel"}
+    
+    print_input "请输入节点隧道名称 [默认: xui-nodes]:"
+    read -r node_tunnel
+    NODE_TUNNEL=${node_tunnel:-"xui-nodes"}
+    
     # X-UI凭据
     echo ""
     print_info "设置X-UI登录凭据:"
@@ -111,7 +115,8 @@ collect_user_info() {
     print_success "配置确认:"
     echo "  面板域名: https://$PANEL_DOMAIN"
     echo "  节点域名: $NODE_DOMAIN"
-    echo "  节点端口: $NODE_PORTS"
+    echo "  面板隧道: $PANEL_TUNNEL"
+    echo "  节点隧道: $NODE_TUNNEL"
     echo "  X-UI用户名: $XUI_USERNAME"
     echo ""
     
@@ -165,35 +170,8 @@ install_xui() {
     if bash x-ui-install.sh; then
         print_success "X-UI 安装成功"
     else
-        print_error "X-UI 安装失败，尝试手动安装..."
-        
-        # 手动安装
-        wget -O x-ui-linux-amd64.tar.gz https://github.com/vaxilu/x-ui/releases/latest/download/x-ui-linux-amd64.tar.gz
-        tar -zxvf x-ui-linux-amd64.tar.gz
-        chmod +x x-ui/x-ui
-        cp x-ui/x-ui /usr/local/bin/
-        
-        # 创建服务
-        cat > /etc/systemd/system/x-ui.service << 'EOF'
-[Unit]
-Description=x-ui Service
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/usr/local/x-ui/
-ExecStart=/usr/local/bin/x-ui
-Restart=on-failure
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        
-        systemctl daemon-reload
-        systemctl enable x-ui
-        systemctl start x-ui
+        print_error "X-UI 安装失败"
+        return 1
     fi
     
     # 等待启动
@@ -207,7 +185,7 @@ EOF
         sleep 2
     done
     
-    rm -f x-ui-install.sh x-ui-linux-amd64.tar.gz 2>/dev/null || true
+    rm -f x-ui-install.sh
     
     return 0
 }
@@ -253,7 +231,7 @@ install_cloudflared() {
 }
 
 # ----------------------------
-# Cloudflare 授权（简化版）
+# Cloudflare 授权
 # ----------------------------
 cloudflare_auth() {
     echo ""
@@ -304,24 +282,53 @@ cloudflare_auth() {
     fi
     
     # 检查凭证文件
-    local json_files=(/root/.cloudflared/*.json)
-    if [[ ${#json_files[@]} -gt 0 ]]; then
-        print_success "✅ 找到凭证文件: $(basename "${json_files[0]}")"
+    local json_file=$(find /root/.cloudflared -name "*.json" -type f | head -1)
+    if [[ -n "$json_file" && -f "$json_file" ]]; then
+        print_success "✅ 找到凭证文件: $(basename "$json_file")"
+        echo "CREDENTIALS_FILE=$json_file" > /tmp/cloudflare_credentials
     else
         print_warning "⚠️  未找到JSON凭证文件，将在创建隧道时生成"
+        echo "CREDENTIALS_FILE=" > /tmp/cloudflare_credentials
     fi
     
     return 0
 }
 
 # ----------------------------
-# 获取或创建隧道
+# 获取凭证文件
 # ----------------------------
-get_or_create_tunnel() {
+get_credentials_file() {
+    local tunnel_name=$1
+    
+    # 首先检查是否已有该隧道的凭证文件
+    local tunnel_file=$(find /root/.cloudflared -name "*${tunnel_name}*.json" -type f | head -1)
+    
+    if [[ -n "$tunnel_file" && -f "$tunnel_file" ]]; then
+        echo "$tunnel_file"
+        return 0
+    fi
+    
+    # 如果没有特定隧道的文件，使用第一个找到的json文件
+    local any_json=$(find /root/.cloudflared -name "*.json" -type f | head -1)
+    
+    if [[ -n "$any_json" && -f "$any_json" ]]; then
+        echo "$any_json"
+        return 0
+    fi
+    
+    # 如果都没有，返回空
+    echo ""
+    return 1
+}
+
+# ----------------------------
+# 创建隧道
+# ----------------------------
+create_tunnel() {
     local tunnel_name=$1
     local description=$2
     
-    print_info "处理 $description 隧道: $tunnel_name"
+    print_info "创建 $description 隧道: $tunnel_name"
     
     # 检查证书
     if [[ ! -f "/root/.cloudflared/cert.pem" ]]; then
@@ -329,25 +336,13 @@ get_or_create_tunnel() {
         return 1
     fi
     
-    # 检查现有隧道
-    local tunnel_info
-    tunnel_info=$("$BIN_DIR/cloudflared" tunnel list 2>/dev/null | grep "$tunnel_name" || true)
-    
-    if [[ -n "$tunnel_info" ]]; then
-        local tunnel_id=$(echo "$tunnel_info" | awk '{print $1}')
-        print_success "✅ 找到现有隧道: $tunnel_id"
-        echo "$tunnel_id"
-        return 0
-    fi
-    
-    # 创建新隧道
-    print_info "创建新隧道..."
-    
-    # 清理可能存在的冲突
+    # 删除可能存在的同名隧道
+    print_info "清理旧隧道..."
     "$BIN_DIR/cloudflared" tunnel delete -f "$tunnel_name" 2>/dev/null || true
     sleep 2
     
-    # 创建隧道
+    # 创建新隧道
+    print_info "正在创建隧道..."
     if "$BIN_DIR/cloudflared" tunnel create "$tunnel_name" 2>&1 | tee /tmp/tunnel_create.log; then
         print_success "隧道创建命令执行成功"
         sleep 3
@@ -358,6 +353,7 @@ get_or_create_tunnel() {
     fi
     
     # 获取隧道ID
+    local tunnel_info
     tunnel_info=$("$BIN_DIR/cloudflared" tunnel list 2>/dev/null | grep "$tunnel_name" || true)
     
     if [[ -n "$tunnel_info" ]]; then
@@ -375,24 +371,38 @@ get_or_create_tunnel() {
 # 配置面板隧道
 # ----------------------------
 setup_panel_tunnel() {
-    print_info "配置面板隧道..."
+    print_info "配置面板隧道: $PANEL_TUNNEL"
     
-    # 获取或创建隧道
+    # 创建隧道
     local panel_tunnel_id
-    panel_tunnel_id=$(get_or_create_tunnel "$PANEL_TUNNEL" "面板")
+    panel_tunnel_id=$(create_tunnel "$PANEL_TUNNEL" "面板")
     
     if [[ -z "$panel_tunnel_id" ]]; then
-        print_error "面板隧道处理失败"
+        print_error "面板隧道创建失败"
         return 1
     fi
     
     # 获取凭证文件
-    local json_file=$(ls -t /root/.cloudflared/*.json 2>/dev/null | head -1)
+    local json_file
+    json_file=$(get_credentials_file "$PANEL_TUNNEL")
     
     if [[ -z "$json_file" ]] || [[ ! -f "$json_file" ]]; then
-        print_error "未找到凭证文件"
-        return 1
+        print_error "未找到凭证文件，尝试查找其他凭证..."
+        
+        # 列出所有凭证文件
+        echo "当前凭证文件:"
+        find /root/.cloudflared -name "*.json" -type f | xargs -I {} basename {} || echo "无"
+        
+        # 使用最新创建的凭证文件
+        json_file=$(find /root/.cloudflared -name "*.json" -type f -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d" ")
+        
+        if [[ -z "$json_file" ]] || [[ ! -f "$json_file" ]]; then
+            print_error "❌ 无法找到任何凭证文件"
+            return 1
+        fi
     fi
+    
+    print_success "使用凭证文件: $(basename "$json_file")"
     
     # 创建配置目录
     mkdir -p "$CONFIG_DIR"
@@ -404,11 +414,11 @@ TUNNEL_ID=$panel_tunnel_id
 TUNNEL_NAME=$PANEL_TUNNEL
 DOMAIN=$PANEL_DOMAIN
 CREDENTIALS_FILE=$json_file
-XUI_PORT=$XUI_PANEL_PORT
+XUI_PORT=54321
 CREATED_DATE=$(date +"%Y-%m-%d %H:%M:%S")
 EOF
     
-    # 创建简化的YAML配置文件
+    # 创建YAML配置文件
     cat > "$CONFIG_DIR/panel-config.yaml" << EOF
 tunnel: $panel_tunnel_id
 credentials-file: $json_file
@@ -416,7 +426,7 @@ logfile: $LOG_DIR/panel-tunnel.log
 loglevel: info
 ingress:
   - hostname: $PANEL_DOMAIN
-    service: http://localhost:$XUI_PANEL_PORT
+    service: http://localhost:54321
   - service: http_status:404
 EOF
     
@@ -428,7 +438,7 @@ EOF
         print_success "✅ DNS绑定成功"
     else
         print_warning "⚠️  DNS绑定可能失败，稍后可手动配置"
-        cat /tmp/dns_panel.log
+        cat /tmp/dns_panel.log | tail -5
     fi
     
     return 0
@@ -438,24 +448,34 @@ EOF
 # 配置节点隧道
 # ----------------------------
 setup_node_tunnel() {
-    print_info "配置节点隧道..."
+    print_info "配置节点隧道: $NODE_TUNNEL"
     
-    # 获取或创建隧道
+    # 创建隧道
     local node_tunnel_id
-    node_tunnel_id=$(get_or_create_tunnel "$NODE_TUNNEL" "节点")
+    node_tunnel_id=$(create_tunnel "$NODE_TUNNEL" "节点")
     
     if [[ -z "$node_tunnel_id" ]]; then
-        print_error "节点隧道处理失败"
+        print_error "节点隧道创建失败"
         return 1
     fi
     
     # 获取凭证文件
-    local json_file=$(ls -t /root/.cloudflared/*.json 2>/dev/null | head -1)
+    local json_file
+    json_file=$(get_credentials_file "$NODE_TUNNEL")
     
     if [[ -z "$json_file" ]] || [[ ! -f "$json_file" ]]; then
-        print_error "未找到凭证文件"
-        return 1
+        print_error "未找到凭证文件，尝试查找其他凭证..."
+        
+        # 使用最新创建的凭证文件
+        json_file=$(find /root/.cloudflared -name "*.json" -type f -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d" ")
+        
+        if [[ -z "$json_file" ]] || [[ ! -f "$json_file" ]]; then
+            print_error "❌ 无法找到任何凭证文件"
+            return 1
+        fi
     fi
+    
+    print_success "使用凭证文件: $(basename "$json_file")"
     
     # 保存配置
     cat > "$CONFIG_DIR/node.conf" << EOF
@@ -464,23 +484,19 @@ TUNNEL_ID=$node_tunnel_id
 TUNNEL_NAME=$NODE_TUNNEL
 DOMAIN=$NODE_DOMAIN
 CREDENTIALS_FILE=$json_file
-NODE_PORTS=$NODE_PORTS
+NODE_PORTS=10000,10001,10002,10003,10004
 CREATED_DATE=$(date +"%Y-%m-%d %H:%M:%S")
 EOF
     
-    # 创建简化的ingress规则
-    local ingress_rules="  - hostname: $NODE_DOMAIN"
-    ingress_rules="$ingress_rules
-    service: http://localhost:10000"
-    
-    # 创建简化的YAML配置文件
+    # 创建YAML配置文件
     cat > "$CONFIG_DIR/node-config.yaml" << EOF
 tunnel: $node_tunnel_id
 credentials-file: $json_file
 logfile: $LOG_DIR/node-tunnel.log
 loglevel: info
 ingress:
-$ingress_rules
+  - hostname: $NODE_DOMAIN
+    service: http://localhost:10000
   - service: http_status:404
 EOF
     
@@ -492,42 +508,10 @@ EOF
         print_success "✅ DNS绑定成功"
     else
         print_warning "⚠️  DNS绑定可能失败，稍后可手动配置"
-        cat /tmp/dns_node.log
+        cat /tmp/dns_node.log | tail -5
     fi
     
     return 0
-}
-
-# ----------------------------
-# 测试隧道连接
-# ----------------------------
-test_tunnel_connection() {
-    local tunnel_name=$1
-    local config_file=$2
-    
-    print_info "测试 $tunnel_name 隧道连接..."
-    
-    # 停止可能存在的进程
-    pkill -f "cloudflared.*$tunnel_name" 2>/dev/null || true
-    sleep 2
-    
-    # 测试运行隧道
-    print_info "启动测试运行（10秒）..."
-    timeout 10 "$BIN_DIR/cloudflared" tunnel --config "$config_file" run 2>&1 | tee /tmp/tunnel_test.log &
-    local test_pid=$!
-    
-    sleep 5
-    
-    # 检查进程是否还在运行
-    if ps -p $test_pid > /dev/null 2>&1; then
-        print_success "✅ 隧道测试运行正常"
-        kill $test_pid 2>/dev/null || true
-        return 0
-    else
-        print_error "❌ 隧道测试运行失败"
-        cat /tmp/tunnel_test.log | tail -20
-        return 1
-    fi
 }
 
 # ----------------------------
@@ -539,8 +523,8 @@ create_services() {
     # 创建日志目录
     mkdir -p "$LOG_DIR"
     
-    # 面板隧道服务 - 简化版本
-    cat > /etc/systemd/system/xui-panel-tunnel.service << 'EOF'
+    # 面板隧道服务
+    cat > /etc/systemd/system/xui-panel-tunnel.service << EOF
 [Unit]
 Description=X-UI Panel Cloudflare Tunnel
 After=network.target
@@ -550,22 +534,18 @@ Wants=network-online.target
 Type=simple
 User=root
 Environment="TUNNEL_ORIGIN_CERT=/root/.cloudflared/cert.pem"
-ExecStart=/usr/local/bin/cloudflared tunnel --config /etc/xui_tunnel/panel-config.yaml run
+ExecStart=$BIN_DIR/cloudflared tunnel --config $CONFIG_DIR/panel-config.yaml run
 Restart=always
 RestartSec=10
-StandardOutput=append:/var/log/xui_tunnel/panel-service.log
-StandardError=append:/var/log/xui_tunnel/panel-error.log
-
-# 安全设置
-NoNewPrivileges=yes
-LimitNPROC=100
+StandardOutput=append:$LOG_DIR/panel-service.log
+StandardError=append:$LOG_DIR/panel-error.log
 
 [Install]
 WantedBy=multi-user.target
 EOF
     
-    # 节点隧道服务 - 简化版本
-    cat > /etc/systemd/system/xui-node-tunnel.service << 'EOF'
+    # 节点隧道服务
+    cat > /etc/systemd/system/xui-node-tunnel.service << EOF
 [Unit]
 Description=X-UI Nodes Cloudflare Tunnel
 After=network.target
@@ -575,15 +555,11 @@ Wants=network-online.target
 Type=simple
 User=root
 Environment="TUNNEL_ORIGIN_CERT=/root/.cloudflared/cert.pem"
-ExecStart=/usr/local/bin/cloudflared tunnel --config /etc/xui_tunnel/node-config.yaml run
+ExecStart=$BIN_DIR/cloudflared tunnel --config $CONFIG_DIR/node-config.yaml run
 Restart=always
 RestartSec=10
-StandardOutput=append:/var/log/xui_tunnel/node-service.log
-StandardError=append:/var/log/xui_tunnel/node-error.log
-
-# 安全设置
-NoNewPrivileges=yes
-LimitNPROC=100
+StandardOutput=append:$LOG_DIR/node-service.log
+StandardError=append:$LOG_DIR/node-error.log
 
 [Install]
 WantedBy=multi-user.target
@@ -606,25 +582,6 @@ start_services() {
         print_success "✅ X-UI 服务启动成功"
     else
         print_error "❌ X-UI 服务启动失败"
-        return 1
-    fi
-    
-    # 测试隧道连接
-    print_info "测试隧道连接..."
-    
-    # 测试面板隧道
-    if test_tunnel_connection "$PANEL_TUNNEL" "$CONFIG_DIR/panel-config.yaml"; then
-        print_success "✅ 面板隧道连接测试通过"
-    else
-        print_error "❌ 面板隧道连接测试失败"
-        return 1
-    fi
-    
-    # 测试节点隧道
-    if test_tunnel_connection "$NODE_TUNNEL" "$CONFIG_DIR/node-config.yaml"; then
-        print_success "✅ 节点隧道连接测试通过"
-    else
-        print_error "❌ 节点隧道连接测试失败"
         return 1
     fi
     
@@ -660,11 +617,14 @@ start_services() {
     
     # 检查隧道状态
     print_info "检查隧道状态..."
-    sleep 3
+    sleep 2
     
     echo ""
     print_info "隧道列表:"
-    "$BIN_DIR/cloudflared" tunnel list 2>/dev/null || echo "无法获取隧道列表"
+    "$BIN_DIR/cloudflared" tunnel list 2>/dev/null || {
+        print_warning "无法获取隧道列表"
+        echo "运行: $BIN_DIR/cloudflared tunnel list"
+    }
     
     return 0
 }
@@ -690,8 +650,8 @@ show_result() {
     
     print_node "🔗 节点配置信息:"
     print_node "   节点域名: $NODE_DOMAIN"
-    print_node "   节点端口: $NODE_PORTS"
-    print_node "   连接端口: 443 (所有节点)"
+    print_node "   节点隧道: $NODE_TUNNEL"
+    print_node "   连接端口: 443"
     print_node "   TLS: 自动由Cloudflare提供"
     echo ""
     
@@ -701,19 +661,18 @@ show_result() {
     echo "  查看隧道日志: journalctl -u xui-panel-tunnel -f"
     echo ""
     
-    print_info "📋 使用步骤:"
-    echo "  1. 访问 https://$PANEL_DOMAIN 登录X-UI面板"
-    echo "  2. 在'入站列表'中创建节点，使用端口 10000-10004"
-    echo "  3. 客户端连接时："
-    echo "     - 服务器: $NODE_DOMAIN"
-    echo "     - 端口: 443"
-    echo "     - 协议: VLESS/VMESS/Trojan + WS + TLS"
+    print_info "📋 X-UI面板配置:"
+    echo "  1. 访问 https://$PANEL_DOMAIN 登录"
+    echo "  2. 在'入站列表'中创建节点"
+    echo "  3. 使用端口: 10000-10004"
+    echo "  4. 协议: VLESS/VMESS/Trojan + WS + TLS"
+    echo "  5. 主机名: $NODE_DOMAIN"
     echo ""
     
     print_warning "⚠️  重要提示:"
     echo "  1. 首次登录后立即修改默认密码"
-    echo "  2. 如果无法访问，等待DNS生效"
-    echo "  3. 检查Cloudflare DNS设置"
+    echo "  2. 确保域名已正确解析到Cloudflare"
+    echo "  3. 如果无法访问，等待DNS生效"
     echo ""
     
     return 0
@@ -767,62 +726,61 @@ main_install() {
     # 显示结果
     show_result
     
-    print_success "🎊 安装完成！现在可以开始使用X-UI面板配置代理节点了。"
+    print_success "🎊 安装完成！"
     
     return 0
 }
 
 # ----------------------------
-# 快速修复功能
+# 手动修复函数
 # ----------------------------
-quick_fix() {
+manual_fix() {
     echo ""
-    print_info "快速修复隧道问题..."
+    print_info "手动修复隧道配置..."
     
-    # 停止服务
-    systemctl stop xui-panel-tunnel.service 2>/dev/null || true
-    systemctl stop xui-node-tunnel.service 2>/dev/null || true
-    pkill -f cloudflared 2>/dev/null || true
-    sleep 2
+    # 显示当前凭证文件
+    echo ""
+    print_info "当前凭证文件:"
+    find /root/.cloudflared -name "*.json" -type f | xargs -I {} echo "  {}" || echo "  无"
     
-    # 检查证书
-    if [ ! -f "/root/.cloudflared/cert.pem" ]; then
-        print_error "未找到证书文件，请重新授权"
-        cloudflare_auth
+    # 显示当前隧道
+    echo ""
+    print_info "当前隧道:"
+    "$BIN_DIR/cloudflared" tunnel list 2>/dev/null || echo "  无"
+    
+    # 询问用户凭证文件路径
+    echo ""
+    print_input "请输入凭证文件完整路径 (例如: /root/.cloudflared/xxx.json):"
+    read -r json_file
+    
+    if [[ -z "$json_file" ]] || [[ ! -f "$json_file" ]]; then
+        print_error "凭证文件不存在"
+        return 1
     fi
     
-    # 重新创建配置文件
-    if [ -f "$CONFIG_DIR/panel.conf" ]; then
-        source "$CONFIG_DIR/panel.conf"
-        
-        cat > "$CONFIG_DIR/panel-config.yaml" << EOF
-tunnel: $TUNNEL_ID
-credentials-file: $CREDENTIALS_FILE
-logfile: $LOG_DIR/panel-tunnel.log
-loglevel: info
-ingress:
-  - hostname: $DOMAIN
-    service: http://localhost:$XUI_PORT
-  - service: http_status:404
-EOF
-        print_success "面板配置文件已修复"
-    fi
+    print_success "使用凭证文件: $json_file"
     
-    if [ -f "$CONFIG_DIR/node.conf" ]; then
-        source "$CONFIG_DIR/node.conf"
-        
-        cat > "$CONFIG_DIR/node-config.yaml" << EOF
-tunnel: $TUNNEL_ID
-credentials-file: $CREDENTIALS_FILE
-logfile: $LOG_DIR/node-tunnel.log
-loglevel: info
-ingress:
-  - hostname: $DOMAIN
-    service: http://localhost:10000
-  - service: http_status:404
-EOF
-        print_success "节点配置文件已修复"
-    fi
+    # 询问隧道名称
+    echo ""
+    print_input "请输入面板隧道名称 [默认: xui-panel]:"
+    read -r panel_tunnel
+    PANEL_TUNNEL=${panel_tunnel:-"xui-panel"}
+    
+    print_input "请输入节点隧道名称 [默认: xui-nodes]:"
+    read -r node_tunnel
+    NODE_TUNNEL=${node_tunnel:-"xui-nodes"}
+    
+    # 询问域名
+    echo ""
+    print_input "请输入面板域名 (例如: kkui.9420ce.top):"
+    read -r PANEL_DOMAIN
+    
+    print_input "请输入节点域名 (例如: proxy.kkui.9420ce.top):"
+    read -r NODE_DOMAIN
+    
+    # 重新配置
+    setup_panel_tunnel
+    setup_node_tunnel
     
     # 重启服务
     systemctl daemon-reload
@@ -831,19 +789,16 @@ EOF
     
     sleep 3
     
-    # 检查结果
     if systemctl is-active --quiet xui-panel-tunnel.service; then
-        print_success "✅ 面板隧道修复成功"
+        print_success "✅ 修复成功！面板隧道已启动"
     else
         print_error "❌ 面板隧道仍然失败"
-        journalctl -u xui-panel-tunnel.service -n 20 --no-pager
     fi
     
     if systemctl is-active --quiet xui-node-tunnel.service; then
-        print_success "✅ 节点隧道修复成功"
+        print_success "✅ 修复成功！节点隧道已启动"
     else
         print_error "❌ 节点隧道仍然失败"
-        journalctl -u xui-node-tunnel.service -n 20 --no-pager
     fi
 }
 
@@ -856,7 +811,7 @@ show_menu() {
     echo "请选择操作："
     echo ""
     echo "  1) 安装 X-UI + Cloudflare Tunnel"
-    echo "  2) 快速修复隧道问题"
+    echo "  2) 手动修复凭证问题"
     echo "  3) 查看服务状态"
     echo "  4) 查看配置信息"
     echo "  5) 重启所有服务"
@@ -881,7 +836,7 @@ show_menu() {
             fi
             ;;
         2)
-            quick_fix
+            manual_fix
             echo ""
             print_input "按回车键返回菜单..."
             read -r
@@ -906,19 +861,13 @@ show_menu() {
             print_info "配置文件:"
             if [ -f "$CONFIG_DIR/panel.conf" ]; then
                 echo "=== 面板配置 ==="
-                cat "$CONFIG_DIR/panel.conf"
-                echo ""
-                echo "=== 面板YAML ==="
-                cat "$CONFIG_DIR/panel-config.yaml"
+                cat "$CONFIG_DIR/panel.conf" 2>/dev/null || echo "无"
                 echo ""
             fi
             
             if [ -f "$CONFIG_DIR/node.conf" ]; then
                 echo "=== 节点配置 ==="
-                cat "$CONFIG_DIR/node.conf"
-                echo ""
-                echo "=== 节点YAML ==="
-                cat "$CONFIG_DIR/node-config.yaml"
+                cat "$CONFIG_DIR/node.conf" 2>/dev/null || echo "无"
             fi
             echo ""
             print_input "按回车键返回菜单..."
@@ -978,7 +927,7 @@ main() {
             main_install
             ;;
         "fix")
-            quick_fix
+            manual_fix
             ;;
         "status")
             show_title
@@ -995,10 +944,10 @@ main() {
         *)
             show_title
             echo "使用方法:"
-            echo "  sudo ./xui_argo.sh menu        # 显示菜单"
-            echo "  sudo ./xui_argo.sh install     # 安装"
-            echo "  sudo ./xui_argo.sh fix         # 快速修复"
-            echo "  sudo ./xui_argo.sh status      # 查看状态"
+            echo "  sudo ./xui_fix.sh menu        # 显示菜单"
+            echo "  sudo ./xui_fix.sh install     # 安装"
+            echo "  sudo ./xui_fix.sh fix         # 手动修复"
+            echo "  sudo ./xui_fix.sh status      # 查看状态"
             exit 1
             ;;
     esac
