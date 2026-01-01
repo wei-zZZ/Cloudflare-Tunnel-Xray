@@ -1,28 +1,28 @@
 Cloudflare Tunnel + Xray 安装脚本说明
 简介
-这是一个自动化的 Bash 脚本，用于在 Linux 服务器上部署 Cloudflare Tunnel 和 Xray (VLESS) 服务。通过 Cloudflare 的 Argo Tunnel 技术，您可以将本地服务安全地暴露到公网，无需公网 IP 和端口转发。
+  这是一个自动化的 Bash 脚本，用于在 Linux 服务器上部署 Cloudflare Tunnel 和 Xray (VLESS) 服务。通过 Cloudflare 的 Argo Tunnel 技术，您可以将本地服务安全地暴露到公网，无需公网 IP 和端口转发。
 
 特性
-✅ 全自动化安装配置
-✅ 支持 x86_64 和 arm64 架构
-✅自动下载最新版 Xray 和 cloudflared
-✅ 交互式 Cloudflare 授权
-✅ 自动创建隧道和 DNS 记录
-✅ 系统服务管理 (systemd)
-✅ 完整的卸载功能
-✅ 静默安装模式
-✅ 授权问题自动修复
+ ✅ 全自动化安装配置
+ ✅ 支持 x86_64 和 arm64 架构
+ ✅自动下载最新版 Xray 和 cloudflared
+ ✅ 交互式 Cloudflare 授权
+ ✅ 自动创建隧道和 DNS 记录
+ ✅ 系统服务管理 (systemd)
+ ✅ 完整的卸载功能
+ ✅ 静默安装模式
+ ✅ 授权问题自动修复
 
 系统要求
-操作系统: Ubuntu/Debian/CentOS 等主流 Linux 发行版
-权限: Root 权限
-网络: 可以访问 GitHub 和 Cloudflare
-内存: 至少 256MB RAM
+ 操作系统: Ubuntu/Debian/CentOS 等主流 Linux 发行版
+ 权限: Root 权限
+ 网络: 可以访问 GitHub 和 Cloudflare
+ 内存: 至少 256MB RAM
 
 安装前准备
-一个域名（可以托管在 Cloudflare）
-Cloudflare 账户
-一台运行 Linux 的服务器
+ 一个域名（可以托管在 Cloudflare）
+ Cloudflare 账户
+ 一台运行 Linux 的服务器
 
 ✅快速开始✅
 ```
