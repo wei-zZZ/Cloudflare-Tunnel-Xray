@@ -94,3 +94,7 @@ secure-tunnel-argo.service - Argo Tunnel 服务
 步骤 8: 启动服务
 启动所有服务并检查状态。
 ```
+bbr自动调节脚本
+```
+curl -sSL -o tcp.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/tcp.sh && chmod +x tcp.sh && sudo ./tcp.sh
+```
