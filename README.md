@@ -20,27 +20,14 @@ Cloudflare Tunnel + Xray 安装脚本说明
  网络: 可以访问 GitHub 和 Cloudflare  
  内存: 至少 256MB RAM  
 
-安装前准备  
+1. 安装前准备  
  一个域名（可以托管在 Cloudflare）  
  Cloudflare 账户  
  一台运行 Linux 的服务器  
 
-✅快速开始✅
+2. ✅快速开始✅
 ```
 curl -sSL -o secure_tunnel.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/secure_tunnel.sh && chmod +x secure_tunnel.sh && sudo ./secure_tunnel.sh
-```
-
-手动安装
-1. 下载脚本
-```
-curl -sSL -o secure_tunnel.sh https://raw.githubusercontent.com/wei-zZZ/Cloudflare-Tunnel-Xray/main/secure_tunnel.sh
-```
-```
-chmod +x secure_tunnel.sh
-```
-2. 运行脚本
-```
-sudo ./secure_tunnel.sh
 ```
 
 3. 选择安装选项
