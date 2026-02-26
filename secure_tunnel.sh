@@ -486,7 +486,7 @@ configure_xray() {
     
     local vless_uuid=$(cat /proc/sys/kernel/random/uuid)
     local vmess_uuid=$(cat /proc/sys/kernel/random/uuid)
-    local port=10000
+    local port=11130
     
     # 保存UUID和端口到配置文件
     echo "VLESS_UUID=$vless_uuid" >> "$CONFIG_DIR/tunnel.conf"
