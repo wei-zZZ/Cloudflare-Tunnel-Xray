@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
 # Cloudflare Tunnel + Xray 安装脚本
-# 版本: 6.3 - 仅支持 VLESS
+# 版本: 6.4 - 集成 TCP 网络优化 (BBR+fq)
 # ============================================
 
 set -e
@@ -46,7 +46,7 @@ show_title() {
     echo ""
     echo "╔══════════════════════════════════════════════╗"
     echo "║    Cloudflare Tunnel + Xray 管理脚本        ║"
-    echo "║             版本: 6.3 - 支持 VLESS          ║"
+    echo "║        版本: 6.4 - 集成 TCP 优化            ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
 }
@@ -57,10 +57,8 @@ show_title() {
 fix_apt_sources() {
     print_info "检查软件源配置..."
     
-    # 备份原有源
     cp /etc/apt/sources.list /etc/apt/sources.list.backup 2>/dev/null || true
     
-    # 检测系统类型
     if grep -q "debian" /etc/os-release; then
         print_info "检测到 Debian 系统，修复软件源..."
         cat > /etc/apt/sources.list << EOF
@@ -77,13 +75,8 @@ deb http://security.ubuntu.com/ubuntu focal-security main restricted universe mu
 EOF
     fi
     
-    # 清除问题源
     rm -f /etc/apt/sources.list.d/*bullseye-backports* 2>/dev/null || true
-    
-    # 更新软件包列表
-    apt-get update -y || {
-        print_warning "软件源更新失败，尝试继续安装..."
-    }
+    apt-get update -y || print_warning "软件源更新失败，尝试继续安装..."
 }
 
 # ----------------------------
@@ -138,40 +131,23 @@ check_system() {
         exit 1
     fi
     
-    # 修复软件源
     fix_apt_sources
     
-    # 安装必要工具
     print_info "安装必要工具..."
-    
     local tools=("curl" "wget" "unzip" "jq")
     for tool in "${tools[@]}"; do
         if ! command -v "$tool" &> /dev/null; then
             print_info "正在安装 $tool..."
-            
-            # 尝试使用apt安装
             if apt-get install -y -qq "$tool" 2>/dev/null; then
                 print_success "$tool 安装成功"
             else
                 print_warning "apt安装 $tool 失败，尝试其他方法..."
-                
-                # 尝试手动下载安装
                 case "$tool" in
-                    "curl")
-                        apt-get install -y libcurl4-openssl-dev || true
-                        ;;
-                    "wget")
-                        wget_direct_install || true
-                        ;;
-                    "unzip")
-                        unzip_direct_install || true
-                        ;;
-                    "jq")
-                        install_jq_directly || true
-                        ;;
+                    "curl") apt-get install -y libcurl4-openssl-dev || true ;;
+                    "wget") wget_direct_install || true ;;
+                    "unzip") unzip_direct_install || true ;;
+                    "jq") install_jq_directly || true ;;
                 esac
-                
-                # 再次检查是否安装成功
                 if ! command -v "$tool" &> /dev/null; then
                     print_error "无法安装 $tool，安装可能不完整"
                 else
@@ -186,21 +162,15 @@ check_system() {
     print_success "系统检查完成"
 }
 
-# 手动安装jq函数
+# 手动安装jq
 install_jq_directly() {
     print_info "手动下载安装 jq..."
     local arch=$(uname -m)
     local jq_url=""
-    
     case "$arch" in
-        x86_64|amd64)
-            jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64"
-            ;;
-        aarch64|arm64)
-            jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-arm64"
-            ;;
+        x86_64|amd64) jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64" ;;
+        aarch64|arm64) jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-arm64" ;;
     esac
-    
     if [ -n "$jq_url" ]; then
         curl -L -o /tmp/jq "$jq_url"
         chmod +x /tmp/jq
@@ -208,42 +178,28 @@ install_jq_directly() {
     fi
 }
 
-# 手动安装wget函数
 wget_direct_install() {
     print_info "手动下载安装 wget..."
     local arch=$(uname -m)
     local wget_url=""
-    
     case "$arch" in
-        x86_64|amd64)
-            wget_url="http://ftp.debian.org/debian/pool/main/w/wget/wget_1.21-1+deb11u1_amd64.deb"
-            ;;
-        aarch64|arm64)
-            wget_url="http://ftp.debian.org/debian/pool/main/w/wget/wget_1.21-1+deb11u1_arm64.deb"
-            ;;
+        x86_64|amd64) wget_url="http://ftp.debian.org/debian/pool/main/w/wget/wget_1.21-1+deb11u1_amd64.deb" ;;
+        aarch64|arm64) wget_url="http://ftp.debian.org/debian/pool/main/w/wget/wget_1.21-1+deb11u1_arm64.deb" ;;
     esac
-    
     if [ -n "$wget_url" ]; then
         curl -L -o /tmp/wget.deb "$wget_url" && dpkg -i /tmp/wget.deb || apt-get install -f -y
         rm -f /tmp/wget.deb
     fi
 }
 
-# 手动安装unzip函数
 unzip_direct_install() {
     print_info "手动下载安装 unzip..."
     local arch=$(uname -m)
     local unzip_url=""
-    
     case "$arch" in
-        x86_64|amd64)
-            unzip_url="http://ftp.debian.org/debian/pool/main/u/unzip/unzip_6.0-26_amd64.deb"
-            ;;
-        aarch64|arm64)
-            unzip_url="http://ftp.debian.org/debian/pool/main/u/unzip/unzip_6.0-26_arm64.deb"
-            ;;
+        x86_64|amd64) unzip_url="http://ftp.debian.org/debian/pool/main/u/unzip/unzip_6.0-26_amd64.deb" ;;
+        aarch64|arm64) unzip_url="http://ftp.debian.org/debian/pool/main/u/unzip/unzip_6.0-26_arm64.deb" ;;
     esac
-    
     if [ -n "$unzip_url" ]; then
         curl -L -o /tmp/unzip.deb "$unzip_url" && dpkg -i /tmp/unzip.deb || apt-get install -f -y
         rm -f /tmp/unzip.deb
@@ -251,7 +207,7 @@ unzip_direct_install() {
 }
 
 # ----------------------------
-# 安装组件（改进版）
+# 安装组件
 # ----------------------------
 install_components() {
     print_info "安装必要组件..."
@@ -274,7 +230,6 @@ install_components() {
             ;;
     esac
     
-    # 下载安装 Xray
     print_info "下载 Xray..."
     if curl -L -o /tmp/xray.zip "$xray_url"; then
         if unzip -q -o /tmp/xray.zip -d /tmp/; then
@@ -296,7 +251,6 @@ install_components() {
         exit 1
     fi
     
-    # 下载安装 cloudflared
     print_info "下载 cloudflared..."
     if curl -L -o /tmp/cloudflared "$cf_url"; then
         mv /tmp/cloudflared "$BIN_DIR/cloudflared"
@@ -307,9 +261,7 @@ install_components() {
         exit 1
     fi
     
-    # 清理临时文件
     rm -rf /tmp/xray* /tmp/cloudflare* 2>/dev/null
-    
     print_success "所有组件安装完成"
 }
 
@@ -323,7 +275,6 @@ direct_cloudflare_auth() {
     print_auth "═══════════════════════════════════════════════"
     echo ""
     
-    # 清理旧的授权文件
     rm -rf /root/.cloudflared 2>/dev/null
     mkdir -p /root/.cloudflared
     
@@ -342,7 +293,6 @@ direct_cloudflare_auth() {
     echo "请复制以下链接到浏览器："
     echo ""
     
-    # 运行授权命令
     "$BIN_DIR/cloudflared" tunnel login
     
     echo ""
@@ -350,13 +300,10 @@ direct_cloudflare_auth() {
     print_input "完成授权后按回车继续..."
     read -r
     
-    # 检查授权结果
     local check_count=0
     while [[ $check_count -lt 10 ]]; do
         if [[ -f "/root/.cloudflared/cert.pem" ]]; then
             print_success "✅ 授权成功！找到证书文件"
-            
-            # 检查凭证文件
             if ls /root/.cloudflared/*.json 1> /dev/null 2>&1; then
                 local json_file=$(ls /root/.cloudflared/*.json | head -1)
                 print_success "✅ 找到凭证文件: $(basename "$json_file")"
@@ -380,30 +327,22 @@ direct_cloudflare_auth() {
 setup_tunnel() {
     print_info "设置 Cloudflare Tunnel..."
     
-    # 检查证书文件
     if [[ ! -f "/root/.cloudflared/cert.pem" ]]; then
         print_error "❌ 未找到证书文件，请先完成授权"
         exit 1
     fi
     
     local json_file=""
-    
-    # 检查是否有现有凭证文件
     if ls /root/.cloudflared/*.json 1> /dev/null 2>&1; then
         json_file=$(ls -t /root/.cloudflared/*.json | head -1)
         print_success "✅ 使用现有凭证文件: $(basename "$json_file")"
     else
         print_warning "⚠️  未找到凭证文件，正在创建隧道..."
-        
-        # 删除可能存在的同名隧道
         "$BIN_DIR/cloudflared" tunnel delete -f "$TUNNEL_NAME" 2>/dev/null || true
         sleep 2
-        
-        # 创建新隧道
         print_info "创建隧道: $TUNNEL_NAME"
         if timeout 60 "$BIN_DIR/cloudflared" tunnel create "$TUNNEL_NAME"; then
             sleep 3
-            # 查找新生成的凭证文件
             json_file=$(ls -t /root/.cloudflared/*.json 2>/dev/null | head -1)
             if [[ -n "$json_file" ]] && [[ -f "$json_file" ]]; then
                 print_success "✅ 隧道创建成功，凭证文件: $(basename "$json_file")"
@@ -417,10 +356,8 @@ setup_tunnel() {
         fi
     fi
     
-    # 获取隧道ID
     local tunnel_id
     tunnel_id=$("$BIN_DIR/cloudflared" tunnel list 2>/dev/null | grep "$TUNNEL_NAME" | awk '{print $1}')
-    
     if [[ -z "$tunnel_id" ]]; then
         print_error "❌ 无法获取隧道ID"
         exit 1
@@ -428,15 +365,11 @@ setup_tunnel() {
     
     print_success "✅ 隧道就绪 (名称: ${TUNNEL_NAME}, ID: ${tunnel_id})"
     
-    # 绑定域名
     print_info "绑定域名: $USER_DOMAIN"
     "$BIN_DIR/cloudflared" tunnel route dns "$TUNNEL_NAME" "$USER_DOMAIN" > /dev/null 2>&1
     print_success "✅ 域名绑定成功"
     
-    # 创建配置目录
     mkdir -p "$CONFIG_DIR"
-    
-    # 保存隧道配置
     cat > "$CONFIG_DIR/tunnel.conf" << EOF
 TUNNEL_ID=$tunnel_id
 TUNNEL_NAME=$TUNNEL_NAME
@@ -457,25 +390,20 @@ configure_xray() {
     print_info "配置 Xray..."
     
     local vless_uuid=$(cat /proc/sys/kernel/random/uuid)
-    local port=10000   # 默认端口改为 10000
+    local port=10000
     
-    # 保存UUID和端口到配置文件
     echo "VLESS_UUID=$vless_uuid" >> "$CONFIG_DIR/tunnel.conf"
     echo "PORT=$port" >> "$CONFIG_DIR/tunnel.conf"
     
-    # 创建必要的目录
     mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
-    
     create_vless_config "$vless_uuid" "$port"
     
     print_success "Xray 配置完成"
 }
 
-# 创建 VLESS 配置
 create_vless_config() {
     local uuid=$1
     local port=$2
-    
     cat > "$CONFIG_DIR/xray.json" << EOF
 {
     "log": {"loglevel": "warning"},
@@ -504,21 +432,17 @@ EOF
 configure_services() {
     print_info "配置系统服务..."
     
-    # 创建服务用户
     if ! id -u "$SERVICE_USER" &> /dev/null; then
         useradd -r -s /usr/sbin/nologin "$SERVICE_USER"
     fi
     
-    # 设置目录权限
     chown -R "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     
-    # 从配置文件读取信息
     local tunnel_id=$(grep "^TUNNEL_ID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     local json_file=$(grep "^CREDENTIALS_FILE=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     local port=$(grep "^PORT=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     
-    # 创建 cloudflared 配置文件
     cat > "$CONFIG_DIR/config.yaml" << EOF
 tunnel: $tunnel_id
 credentials-file: $json_file
@@ -536,7 +460,6 @@ ingress:
   - service: http_status:404
 EOF
     
-    # 创建 Xray 服务文件
     cat > /etc/systemd/system/secure-tunnel-xray.service << EOF
 [Unit]
 Description=Secure Tunnel Xray Service
@@ -556,7 +479,6 @@ StandardError=append:$LOG_DIR/xray-error.log
 WantedBy=multi-user.target
 EOF
     
-    # 创建 Argo Tunnel 服务文件
     cat > /etc/systemd/system/secure-tunnel-argo.service << EOF
 [Unit]
 Description=Secure Tunnel Argo Service
@@ -579,7 +501,6 @@ StandardError=append:$LOG_DIR/argo-error.log
 WantedBy=multi-user.target
 EOF
     
-    # 重载systemd
     systemctl daemon-reload
     print_success "系统服务配置完成"
 }
@@ -590,12 +511,10 @@ EOF
 start_services() {
     print_info "启动服务..."
     
-    # 停止可能存在的旧服务
     systemctl stop secure-tunnel-argo.service 2>/dev/null || true
     systemctl stop secure-tunnel-xray.service 2>/dev/null || true
     sleep 2
     
-    # 启动Xray服务
     systemctl enable secure-tunnel-xray.service > /dev/null 2>&1
     systemctl start secure-tunnel-xray.service
     sleep 3
@@ -608,27 +527,21 @@ start_services() {
         return 1
     fi
     
-    # 启动Argo Tunnel服务
     print_info "启动 Argo Tunnel..."
     systemctl enable secure-tunnel-argo.service > /dev/null 2>&1
     systemctl start secure-tunnel-argo.service
     
-    # 等待隧道连接
     local wait_time=0
     local max_wait=60
-    
     print_info "等待隧道连接建立（最多60秒）..."
-    
     while [[ $wait_time -lt $max_wait ]]; do
         if systemctl is-active --quiet secure-tunnel-argo.service; then
             print_success "✅ Argo Tunnel 服务运行中"
             break
         fi
-        
         if [[ $((wait_time % 15)) -eq 0 ]] && [[ $wait_time -gt 0 ]]; then
             print_info "已等待 ${wait_time}秒..."
         fi
-        
         sleep 3
         ((wait_time+=3))
     done
@@ -640,6 +553,164 @@ start_services() {
     
     sleep 3
     return 0
+}
+
+# ----------------------------
+# TCP 网络优化 (BBR+fq)
+# ----------------------------
+apply_tcp_tuning() {
+    print_info "TCP 网络优化 (BBR + fq)"
+    echo ""
+    
+    local mem_g_input bw_mbps_input rtt_ms_input
+    if [ "$SILENT_MODE" = true ] || [ "${1:-}" = "--auto" ]; then
+        mem_g_input=1
+        bw_mbps_input=1000
+        rtt_ms_input=150
+        print_info "自动模式使用默认参数: 内存1GiB, 带宽1000Mbps, RTT 150ms"
+    else
+        print_input "内存大小 (GiB) [默认 1]: "
+        read -r mem_g_input
+        print_input "带宽 (Mbps) [默认 1000]: "
+        read -r bw_mbps_input
+        print_input "往返延迟 RTT (ms) [默认 150]: "
+        read -r rtt_ms_input
+    fi
+    
+    local MEM_G=${mem_g_input:-1}
+    local BW_Mbps=${bw_mbps_input:-1000}
+    local RTT_ms=${rtt_ms_input:-150}
+    
+    # 校验输入
+    if ! [[ "$MEM_G" =~ ^[0-9]+([.][0-9]+)?$ ]]; then MEM_G=1; fi
+    if ! [[ "$BW_Mbps" =~ ^[0-9]+$ ]]; then BW_Mbps=1000; fi
+    if ! [[ "$RTT_ms" =~ ^[0-9]+([.][0-9]+)?$ ]]; then RTT_ms=150; fi
+    
+    local SYSCTL_TARGET="/etc/sysctl.d/999-net-bbr-fq.conf"
+    local KEY_REGEX='^(net\.core\.default_qdisc|net\.core\.rmem_max|net\.core\.wmem_max|net\.core\.rmem_default|net\.core\.wmem_default|net\.ipv4\.tcp_rmem|net\.ipv4\.tcp_wmem|net\.ipv4\.tcp_congestion_control)[[:space:]]*='
+    
+    # 计算 BDP 和桶化最大值
+    local BDP_BYTES=$(awk -v bw="$BW_Mbps" -v rtt="$RTT_ms" 'BEGIN{ printf "%.0f", bw*125*rtt }')
+    local MEM_BYTES=$(awk -v g="$MEM_G" 'BEGIN{ printf "%.0f", g*1024*1024*1024 }')
+    local TWO_BDP=$(( BDP_BYTES*2 ))
+    local RAM3_BYTES=$(awk -v m="$MEM_BYTES" 'BEGIN{ printf "%.0f", m*0.03 }')
+    local CAP64=$(( 64*1024*1024 ))
+    local MAX_NUM_BYTES=$(awk -v a="$TWO_BDP" -v b="$RAM3_BYTES" -v c="$CAP64" 'BEGIN{ m=a; if(b<m)m=b; if(c<m)m=c; printf "%.0f", m }')
+    
+    bucket_le_mb() {
+        local mb="${1:-0}"
+        if   [ "$mb" -ge 64 ]; then echo 64
+        elif [ "$mb" -ge 32 ]; then echo 32
+        elif [ "$mb" -ge 16 ]; then echo 16
+        elif [ "$mb" -ge 8 ]; then echo 8
+        elif [ "$mb" -ge 4 ]; then echo 4
+        else echo 4
+        fi
+    }
+    local MAX_MB_NUM=$(( MAX_NUM_BYTES/1024/1024 ))
+    local MAX_MB=$(bucket_le_mb "$MAX_MB_NUM")
+    local MAX_BYTES=$(( MAX_MB*1024*1024 ))
+    
+    local DEF_R=131072 DEF_W=131072
+    if [ "$MAX_MB" -ge 32 ]; then
+        DEF_R=262144; DEF_W=524288
+    elif [ "$MAX_MB" -ge 8 ]; then
+        DEF_R=131072; DEF_W=262144
+    else
+        DEF_R=131072; DEF_W=131072
+    fi
+    
+    local TCP_RMEM_MIN=4096 TCP_RMEM_DEF=87380 TCP_RMEM_MAX=$MAX_BYTES
+    local TCP_WMEM_MIN=4096 TCP_WMEM_DEF=65536 TCP_WMEM_MAX=$MAX_BYTES
+    
+    # 清理冲突
+    print_info "清理旧配置冲突..."
+    local f="/etc/sysctl.conf"
+    if [ -f "$f" ] && grep -Eq "$KEY_REGEX" "$f"; then
+        note "注释 /etc/sysctl.conf 中的冲突键"
+        awk -v re="$KEY_REGEX" '
+            $0 ~ re && $0 !~ /^[[:space:]]*#/ { print "# " $0; next }
+            { print $0 }
+        ' "$f" > "${f}.tmp.$$"
+        install -m 0644 "${f}.tmp.$$" "$f"
+        rm -f "${f}.tmp.$$"
+    fi
+    
+    # 删除 /etc/sysctl.d 下含冲突键的旧文件
+    if [ -d "/etc/sysctl.d" ]; then
+        shopt -s nullglob
+        for cf in /etc/sysctl.d/*.conf; do
+            [ "$(readlink -f "$cf")" = "$(readlink -f "$SYSCTL_TARGET")" ] && continue
+            if grep -Eq "$KEY_REGEX" "$cf"; then
+                rm -f -- "$cf"
+                print_info "已删除冲突文件：$cf"
+            fi
+        done
+        shopt -u nullglob
+    fi
+    
+    # 只读提示其他目录
+    for dir in /usr/local/lib/sysctl.d /usr/lib/sysctl.d /lib/sysctl.d /run/sysctl.d; do
+        if [ -d "$dir" ] && grep -RIlEq "$KEY_REGEX" "$dir" 2>/dev/null; then
+            print_warning "其他目录存在冲突（仅提示）: $dir"
+            grep -RhnE "$KEY_REGEX" "$dir" 2>/dev/null || true
+        fi
+    done
+    
+    # 启用 BBR 模块
+    if command -v modprobe >/dev/null 2>&1; then
+        modprobe tcp_bbr 2>/dev/null || true
+    fi
+    
+    # 写入新配置
+    local tmpf="$(mktemp)"
+    cat >"$tmpf" <<EOF
+# Auto-generated by secure_tunnel (TCP tuning)
+# Inputs: MEM_G=${MEM_G}GiB, BW=${BW_Mbps}Mbps, RTT=${RTT_ms}ms
+# BDP: ${BDP_BYTES} bytes (~$(awk -v b="$BDP_BYTES" 'BEGIN{ printf "%.2f", b/1024/1024 }') MB)
+# Caps: min(2*BDP, 3%RAM, 64MB) -> Bucket ${MAX_MB} MB
+
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+net.core.rmem_default = ${DEF_R}
+net.core.wmem_default = ${DEF_W}
+net.core.rmem_max = ${MAX_BYTES}
+net.core.wmem_max = ${MAX_BYTES}
+
+net.ipv4.tcp_rmem = ${TCP_RMEM_MIN} ${TCP_RMEM_DEF} ${TCP_RMEM_MAX}
+net.ipv4.tcp_wmem = ${TCP_WMEM_MIN} ${TCP_WMEM_DEF} ${TCP_WMEM_MAX}
+
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_fastopen = 3
+EOF
+    install -m 0644 "$tmpf" "$SYSCTL_TARGET"
+    rm -f "$tmpf"
+    
+    sysctl --system >/dev/null
+    
+    # 尝试设置 qdisc
+    local iface=$(ip -o -4 route show to default 2>/dev/null | awk '{print $5}' | head -1)
+    if command -v tc >/dev/null 2>&1 && [ -n "${iface:-}" ]; then
+        tc qdisc replace dev "$iface" root fq 2>/dev/null || true
+    fi
+    
+    echo ""
+    print_success "TCP 优化已完成"
+    echo "==== 当前生效值 ===="
+    echo "内存: ${MEM_G} GiB, 带宽: ${BW_Mbps} Mbps, RTT: ${RTT_ms} ms"
+    echo "桶值: ${MAX_MB} MB"
+    sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null && echo -n " 拥塞控制: " && sysctl -n net.ipv4.tcp_congestion_control
+    sysctl -n net.core.default_qdisc 2>/dev/null && echo -n " 默认队列: " && sysctl -n net.core.default_qdisc
+    sysctl -n net.core.rmem_max 2>/dev/null && echo -n " rmem_max: " && sysctl -n net.core.rmem_max
+    sysctl -n net.core.wmem_max 2>/dev/null && echo -n " wmem_max: " && sysctl -n net.core.wmem_max
+    sysctl -n net.ipv4.tcp_rmem 2>/dev/null && echo -n " tcp_rmem: " && sysctl -n net.ipv4.tcp_rmem
+    sysctl -n net.ipv4.tcp_wmem 2>/dev/null && echo -n " tcp_wmem: " && sysctl -n net.ipv4.tcp_wmem
+    if [ -n "${iface:-}" ]; then
+        echo "接口 ${iface} 的 qdisc:"
+        tc qdisc show dev "$iface" 2>/dev/null || echo "  无法获取"
+    fi
+    echo "=================="
 }
 
 # ----------------------------
@@ -669,7 +740,6 @@ modify_vless_config() {
     local current_port=$(grep "^PORT=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     current_port=${current_port:-10000}
     
-    # 从 xray.json 获取当前路径
     if [[ -f "$CONFIG_DIR/xray.json" ]]; then
         current_path=$(grep -oP '"path": "\K[^"]+' "$CONFIG_DIR/xray.json" | head -1)
     fi
@@ -688,7 +758,6 @@ modify_vless_config() {
             print_input "请输入新的 WebSocket 路径 (例如: /mynewpath, 直接回车保留原值):"
             read -r new_path_input
             if [[ -n "$new_path_input" ]]; then
-                # 确保路径以 / 开头
                 [[ "$new_path_input" != /* ]] && new_path_input="/$new_path_input"
                 new_path="$new_path_input"
             else
@@ -731,22 +800,16 @@ modify_vless_config() {
                 print_error "端口无效，请输入 1024-65535 之间的数字"
                 return 1
             fi
-            # 单独处理端口修改后，更新配置并重启服务
-            # 更新 tunnel.conf 中的 PORT
+            # 执行端口修改
             sed -i "s/^PORT=.*/PORT=$new_port/" "$CONFIG_DIR/tunnel.conf"
-            
-            # 更新 xray.json 中的端口
             local current_uuid_for_port=$(grep "^VLESS_UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
             local current_path_for_port=$(grep -oP '"path": "\K[^"]+' "$CONFIG_DIR/xray.json" | head -1)
             current_path_for_port=${current_path_for_port:-"/$current_uuid_for_port"}
-            
             create_vless_config "$current_uuid_for_port" "$new_port"
             
-            # 更新 cloudflared config.yaml 中的 ingress service 端口
             local tunnel_id=$(grep "^TUNNEL_ID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
             local json_file=$(grep "^CREDENTIALS_FILE=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
             local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
-            
             cat > "$CONFIG_DIR/config.yaml" << EOF
 tunnel: $tunnel_id
 credentials-file: $json_file
@@ -763,26 +826,20 @@ ingress:
       noHappyEyeballs: true
   - service: http_status:404
 EOF
-            
-            # 重启服务
             print_info "重启 Xray 和 Argo Tunnel 服务..."
             systemctl restart secure-tunnel-xray.service
             systemctl restart secure-tunnel-argo.service
             sleep 3
-            
             if systemctl is-active --quiet secure-tunnel-xray.service && systemctl is-active --quiet secure-tunnel-argo.service; then
                 print_success "✅ 服务已重启，端口已改为 $new_port"
             else
                 print_warning "⚠️ 服务重启可能有问题，请检查状态"
             fi
-            
-            # 显示新的连接信息
             local domain_show=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
             local uuid_show=$(grep "^VLESS_UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
             local path_show=$(grep -oP '"path": "\K[^"]+' "$CONFIG_DIR/xray.json" | head -1)
             path_show=${path_show:-"/$uuid_show"}
             local vless_link="vless://${uuid_show}@${domain_show}:443?encryption=none&security=tls&type=ws&host=${domain_show}&path=${path_show}&sni=${domain_show}#Cloudflare-Tunnel-VLESS"
-            
             echo ""
             print_success "端口修改完成！新的 VLESS 链接:"
             echo "$vless_link"
@@ -798,19 +855,14 @@ EOF
             ;;
     esac
     
-    # 如果执行到这里，说明是 UUID/路径相关的修改（非端口修改）
-    # 如果路径为空或未设置，生成默认路径
     if [[ -z "$new_path" ]]; then
         new_path="/$new_uuid"
     fi
     
-    # 更新配置文件中的 UUID
     sed -i "s/^VLESS_UUID=.*/VLESS_UUID=$new_uuid/" "$CONFIG_DIR/tunnel.conf"
     
-    # 重新生成 xray.json
     local port=$(grep "^PORT=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     port=${port:-10000}
-    
     cat > "$CONFIG_DIR/xray.json" << EOF
 {
     "log": {"loglevel": "warning"},
@@ -832,7 +884,6 @@ EOF
 }
 EOF
     
-    # 重启 Xray 服务
     print_info "重启 Xray 服务..."
     systemctl restart secure-tunnel-xray.service
     sleep 2
@@ -850,10 +901,8 @@ EOF
     echo "  新 WebSocket 路径: $new_path"
     echo ""
     
-    # 显示新的连接链接
     local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     local vless_link="vless://${new_uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=${new_path}&sni=${domain}#Cloudflare-Tunnel-VLESS"
-    
     print_info "📡 新的 VLESS 链接:"
     echo "$vless_link"
     echo ""
@@ -887,7 +936,6 @@ show_connection_info() {
     echo ""
     
     if [[ -n "$vless_uuid" ]]; then
-        # 从 xray.json 获取路径
         local ws_path=""
         if [[ -f "$CONFIG_DIR/xray.json" ]]; then
             ws_path=$(grep -oP '"path": "\K[^"]+' "$CONFIG_DIR/xray.json" | head -1)
@@ -899,7 +947,6 @@ show_connection_info() {
         echo ""
         
         local vless_tls="vless://${vless_uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=${ws_path}&sni=${domain}#Cloudflare-Tunnel-VLESS"
-        
         echo "📋 VLESS 链接:"
         echo "$vless_tls"
     else
@@ -933,6 +980,7 @@ show_connection_info() {
     echo "  状态检查: sudo ./secure_tunnel.sh status"
     echo "  查看配置: sudo ./secure_tunnel.sh config"
     echo "  修改配置: sudo ./secure_tunnel.sh modify"
+    echo "  TCP 优化: sudo ./secure_tunnel.sh tcp"
     echo "  重启服务: systemctl restart secure-tunnel-argo.service"
     echo "  查看日志: journalctl -u secure-tunnel-argo.service -f"
 }
@@ -947,7 +995,6 @@ main_install() {
     install_components
     collect_user_info
     
-    # Cloudflare 授权
     if ! direct_cloudflare_auth; then
         print_warning "授权可能有问题"
         print_input "是否继续安装？(y/N): "
@@ -958,7 +1005,6 @@ main_install() {
         fi
     fi
     
-    # 设置隧道
     if ! setup_tunnel; then
         print_error "隧道设置失败"
         return 1
@@ -973,6 +1019,13 @@ main_install() {
     fi
     
     show_connection_info
+    
+    echo ""
+    print_input "是否立即应用 TCP 网络优化 (BBR+fq)？(y/N): "
+    read -r apply_tcp
+    if [[ "$apply_tcp" == "y" || "$apply_tcp" == "Y" ]]; then
+        apply_tcp_tuning
+    fi
     
     echo ""
     print_success "🎉 安装完成！"
@@ -996,16 +1049,12 @@ uninstall_all() {
     
     echo ""
     print_info "停止服务..."
-    
     systemctl stop secure-tunnel-argo.service 2>/dev/null || true
     systemctl stop secure-tunnel-xray.service 2>/dev/null || true
-    
     systemctl disable secure-tunnel-argo.service 2>/dev/null || true
     systemctl disable secure-tunnel-xray.service 2>/dev/null || true
-    
     rm -f /etc/systemd/system/secure-tunnel-argo.service
     rm -f /etc/systemd/system/secure-tunnel-xray.service
-    
     rm -rf "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     
     print_input "是否删除 Xray 和 cloudflared 二进制文件？(y/N): "
@@ -1024,7 +1073,6 @@ uninstall_all() {
     fi
     
     systemctl daemon-reload
-    
     echo ""
     print_success "✅ 卸载完成！"
 }
@@ -1048,7 +1096,6 @@ show_config() {
         return 1
     fi
     
-    # 获取路径
     local ws_path=""
     if [[ -f "$CONFIG_DIR/xray.json" ]]; then
         ws_path=$(grep -oP '"path": "\K[^"]+' "$CONFIG_DIR/xray.json" | head -1)
@@ -1065,7 +1112,6 @@ show_config() {
     echo ""
     
     local vless_link="vless://${vless_uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=${ws_path}&sni=${domain}#Cloudflare-Tunnel-VLESS"
-    
     print_info "📡 VLESS链接:"
     echo "$vless_link"
     echo ""
@@ -1083,12 +1129,10 @@ show_status() {
     else
         print_error "Xray 服务: 未运行"
     fi
-    
     echo ""
     
     if systemctl is-active --quiet secure-tunnel-argo.service; then
         print_success "Argo Tunnel 服务: 运行中"
-        
         echo ""
         print_info "隧道信息:"
         "$BIN_DIR/cloudflared" tunnel list 2>/dev/null || true
@@ -1110,10 +1154,11 @@ show_menu() {
     echo "  3) 查看服务状态"
     echo "  4) 查看配置信息"
     echo "  5) 修改 VLESS 配置 (UUID/路径/端口)"
-    echo "  6) 退出"
+    echo "  6) 应用 TCP 网络优化 (BBR+fq)"
+    echo "  7) 退出"
     echo ""
     
-    print_input "请输入选项 (1-6): "
+    print_input "请输入选项 (1-7): "
     read -r choice
     
     case "$choice" in
@@ -1155,6 +1200,12 @@ show_menu() {
             read -r
             ;;
         6)
+            apply_tcp_tuning
+            echo ""
+            print_input "按回车键返回菜单..."
+            read -r
+            ;;
+        7)
             print_info "再见！"
             exit 0
             ;;
@@ -1193,6 +1244,10 @@ main() {
             show_title
             modify_vless_config
             ;;
+        "tcp")
+            show_title
+            apply_tcp_tuning
+            ;;
         "-y"|"--silent")
             SILENT_MODE=true
             show_title
@@ -1210,6 +1265,7 @@ main() {
             echo "  sudo ./secure_tunnel.sh status        # 查看状态"
             echo "  sudo ./secure_tunnel.sh config        # 查看配置"
             echo "  sudo ./secure_tunnel.sh modify        # 修改VLESS配置"
+            echo "  sudo ./secure_tunnel.sh tcp           # TCP网络优化"
             echo "  sudo ./secure_tunnel.sh -y            # 静默安装"
             exit 1
             ;;
