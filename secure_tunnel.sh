@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
 # Cloudflare Tunnel + Xray 管理脚本
-# 版本: 6.6 - 修复 Reality JSON 格式错误
+# 版本: 6.7 - 彻底修复 JSON 生成错误
 # ============================================
 
 set -e
@@ -49,7 +49,7 @@ show_title() {
     echo ""
     echo "╔══════════════════════════════════════════════╗"
     echo "║    Cloudflare Tunnel + Xray 管理脚本        ║"
-    echo "║       版本: 6.6 - 修复 Reality JSON         ║"
+    echo "║       版本: 6.7 - 完全修复 JSON             ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
 }
@@ -388,7 +388,7 @@ generate_reality_keypair() {
 }
 
 # ----------------------------
-# 配置 Xray (VLESS WS + VLESS Reality) - 使用 jq 安全生成
+# 配置 Xray (VLESS WS + VLESS Reality) - 完全使用 jq 生成，避免字符串拼接
 # ----------------------------
 configure_xray() {
     print_info "配置 Xray (VLESS WebSocket + VLESS Reality) ..."
@@ -415,7 +415,7 @@ EOF
     
     mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     
-    # 使用 jq 生成配置文件
+    # 使用 jq 生成配置文件（单次调用，避免嵌套）
     create_xray_config "$ws_uuid" "$reality_uuid" "$reality_private_key" "$reality_short_id"
     
     print_success "Xray 配置完成"
@@ -427,13 +427,14 @@ create_xray_config() {
     local reality_private_key=$3
     local reality_short_id=$4
     
-    # 构建 serverNames 数组（jq 会自动转义）
-    local server_names_json=$(jq -n \
-        --arg d "$USER_DOMAIN" \
-        --arg m1 "www.microsoft.com" \
-        --arg m2 "addons.mozilla.org" \
-        '[$d, $m1, $m2]')
+    # 直接从配置文件读取域名，确保变量存在
+    local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    if [[ -z "$domain" ]]; then
+        print_error "无法读取域名配置"
+        exit 1
+    fi
     
+    # 使用 jq 生成完整配置，所有数组在内部构造
     jq -n \
         --arg ws_uuid "$ws_uuid" \
         --arg ws_port "$WS_PORT" \
@@ -441,8 +442,9 @@ create_xray_config() {
         --arg reality_port "$REALITY_PORT" \
         --arg reality_private_key "$reality_private_key" \
         --arg reality_short_id "$reality_short_id" \
-        --argjson server_names "$server_names_json" \
-        '{
+        --arg domain "$domain" \
+        '
+        {
             log: {loglevel: "warning"},
             inbounds: [
                 {
@@ -471,8 +473,8 @@ create_xray_config() {
                         network: "tcp",
                         security: "reality",
                         realitySettings: {
-                            dest: "www.microsoft.com",
-                            serverNames: $server_names,
+                            dest: "www.microsoft.com:443",
+                            serverNames: [$domain, "www.microsoft.com", "addons.mozilla.org"],
                             privateKey: $reality_private_key,
                             shortIds: [$reality_short_id]
                         }
@@ -482,6 +484,22 @@ create_xray_config() {
             ],
             outbounds: [{protocol: "freedom", tag: "direct"}]
         }' > "$CONFIG_DIR/xray.json"
+}
+
+# ----------------------------
+# 测试 Xray 配置
+# ----------------------------
+test_xray_config() {
+    print_info "测试 Xray 配置..."
+    if "$BIN_DIR/xray" run -test -config "$CONFIG_DIR/xray.json" > /dev/null 2>&1; then
+        print_success "✅ Xray 配置测试通过"
+        return 0
+    else
+        print_error "❌ Xray 配置测试失败"
+        echo "详细错误信息："
+        "$BIN_DIR/xray" run -test -config "$CONFIG_DIR/xray.json" 2>&1 || true
+        return 1
+    fi
 }
 
 # ----------------------------
@@ -565,6 +583,13 @@ EOF
 # ----------------------------
 start_services() {
     print_info "启动服务..."
+    
+    # 先测试配置
+    if ! test_xray_config; then
+        print_error "Xray 配置无效，请手动检查"
+        return 1
+    fi
+    
     systemctl stop secure-tunnel-argo.service 2>/dev/null || true
     systemctl stop secure-tunnel-xray.service 2>/dev/null || true
     sleep 2
@@ -921,6 +946,12 @@ modify_ws_config() {
     local reality_short_id=$(grep "^REALITY_SHORT_ID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     create_xray_config "$new_uuid" "$reality_uuid" "$reality_private_key" "$reality_short_id"
     
+    # 测试配置
+    if ! test_xray_config; then
+        print_error "新配置无效，已保留原配置"
+        return 1
+    fi
+    
     systemctl restart secure-tunnel-xray.service
     print_success "WebSocket 配置已更新"
     echo "新 UUID: $new_uuid, 路径: $new_path"
@@ -966,6 +997,12 @@ modify_reality_config() {
     # 重新生成完整配置
     local ws_uuid=$(grep "^WS_UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     create_xray_config "$ws_uuid" "$new_uuid" "$new_private_key" "$new_short_id"
+    
+    # 测试配置
+    if ! test_xray_config; then
+        print_error "新配置无效，已保留原配置"
+        return 1
+    fi
     
     systemctl restart secure-tunnel-xray.service
     print_success "Reality 配置已更新"
