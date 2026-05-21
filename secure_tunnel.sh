@@ -471,7 +471,7 @@ create_xray_config() {
                         network: "tcp",
                         security: "reality",
                         realitySettings: {
-                            dest: "www.microsoft.com:443",
+                            dest: "www.microsoft.com",
                             serverNames: $server_names,
                             privateKey: $reality_private_key,
                             shortIds: [$reality_short_id]
