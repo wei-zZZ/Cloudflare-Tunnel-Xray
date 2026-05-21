@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
 # Cloudflare Tunnel + Xray 管理脚本
-# 版本: 6.5 - 支持 VLESS WS (CF Tunnel) + VLESS Reality (直连)
+# 版本: 6.6 - 修复 Reality JSON 格式错误
 # ============================================
 
 set -e
@@ -49,7 +49,7 @@ show_title() {
     echo ""
     echo "╔══════════════════════════════════════════════╗"
     echo "║    Cloudflare Tunnel + Xray 管理脚本        ║"
-    echo "║       版本: 6.5 - 支持 VLESS Reality        ║"
+    echo "║       版本: 6.6 - 修复 Reality JSON         ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
 }
@@ -388,7 +388,7 @@ generate_reality_keypair() {
 }
 
 # ----------------------------
-# 配置 Xray (VLESS WS + VLESS Reality)
+# 配置 Xray (VLESS WS + VLESS Reality) - 使用 jq 安全生成
 # ----------------------------
 configure_xray() {
     print_info "配置 Xray (VLESS WebSocket + VLESS Reality) ..."
@@ -402,7 +402,6 @@ configure_xray() {
     local reality_private_key=$(echo "$keypair" | cut -d'|' -f1)
     local reality_public_key=$(echo "$keypair" | cut -d'|' -f2)
     local reality_short_id=$(openssl rand -hex 8)
-    local reality_server_names="\"${USER_DOMAIN}\", \"www.microsoft.com\", \"addons.mozilla.org\""
     
     # 保存所有参数到配置文件
     cat >> "$CONFIG_DIR/tunnel.conf" << EOF
@@ -416,7 +415,7 @@ EOF
     
     mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     
-    # 生成 Xray 配置 (两个入站)
+    # 使用 jq 生成配置文件
     create_xray_config "$ws_uuid" "$reality_uuid" "$reality_private_key" "$reality_short_id"
     
     print_success "Xray 配置完成"
@@ -428,48 +427,61 @@ create_xray_config() {
     local reality_private_key=$3
     local reality_short_id=$4
     
-    cat > "$CONFIG_DIR/xray.json" << EOF
-{
-    "log": {"loglevel": "warning"},
-    "inbounds": [
-        {
-            "port": $WS_PORT,
-            "listen": "127.0.0.1",
-            "protocol": "vless",
-            "settings": {
-                "clients": [{"id": "$ws_uuid", "level": 0}],
-                "decryption": "none"
-            },
-            "streamSettings": {
-                "network": "ws",
-                "security": "none",
-                "wsSettings": {"path": "/$ws_uuid"}
-            },
-            "tag": "vless-ws-in"
-        },
-        {
-            "port": $REALITY_PORT,
-            "protocol": "vless",
-            "settings": {
-                "clients": [{"id": "$reality_uuid", "flow": "xtls-rprx-vision", "level": 0}],
-                "decryption": "none"
-            },
-            "streamSettings": {
-                "network": "tcp",
-                "security": "reality",
-                "realitySettings": {
-                    "dest": "www.microsoft.com:443",
-                    "serverNames": [$reality_server_names],
-                    "privateKey": "$reality_private_key",
-                    "shortIds": ["$reality_short_id"]
+    # 构建 serverNames 数组（jq 会自动转义）
+    local server_names_json=$(jq -n \
+        --arg d "$USER_DOMAIN" \
+        --arg m1 "www.microsoft.com" \
+        --arg m2 "addons.mozilla.org" \
+        '[$d, $m1, $m2]')
+    
+    jq -n \
+        --arg ws_uuid "$ws_uuid" \
+        --arg ws_port "$WS_PORT" \
+        --arg reality_uuid "$reality_uuid" \
+        --arg reality_port "$REALITY_PORT" \
+        --arg reality_private_key "$reality_private_key" \
+        --arg reality_short_id "$reality_short_id" \
+        --argjson server_names "$server_names_json" \
+        '{
+            log: {loglevel: "warning"},
+            inbounds: [
+                {
+                    port: ($ws_port | tonumber),
+                    listen: "127.0.0.1",
+                    protocol: "vless",
+                    settings: {
+                        clients: [{id: $ws_uuid, level: 0}],
+                        decryption: "none"
+                    },
+                    streamSettings: {
+                        network: "ws",
+                        security: "none",
+                        wsSettings: {path: ("/" + $ws_uuid)}
+                    },
+                    tag: "vless-ws-in"
+                },
+                {
+                    port: ($reality_port | tonumber),
+                    protocol: "vless",
+                    settings: {
+                        clients: [{id: $reality_uuid, flow: "xtls-rprx-vision", level: 0}],
+                        decryption: "none"
+                    },
+                    streamSettings: {
+                        network: "tcp",
+                        security: "reality",
+                        realitySettings: {
+                            dest: "www.microsoft.com:443",
+                            serverNames: $server_names,
+                            privateKey: $reality_private_key,
+                            shortIds: [$reality_short_id]
+                        }
+                    },
+                    tag: "vless-reality-in"
                 }
-            },
-            "tag": "vless-reality-in"
-        }
-    ],
-    "outbounds": [{"protocol": "freedom", "tag": "direct"}]
-}
-EOF
+            ],
+            outbounds: [{protocol: "freedom", tag: "direct"}]
+        }' > "$CONFIG_DIR/xray.json"
 }
 
 # ----------------------------
@@ -594,6 +606,164 @@ start_services() {
 }
 
 # ----------------------------
+# TCP 网络优化 (BBR+fq)
+# ----------------------------
+apply_tcp_tuning() {
+    print_info "TCP 网络优化 (BBR + fq)"
+    echo ""
+    
+    local mem_g_input bw_mbps_input rtt_ms_input
+    if [ "$SILENT_MODE" = true ] || [ "${1:-}" = "--auto" ]; then
+        mem_g_input=1
+        bw_mbps_input=1000
+        rtt_ms_input=150
+        print_info "自动模式使用默认参数: 内存1GiB, 带宽1000Mbps, RTT 150ms"
+    else
+        print_input "内存大小 (GiB) [默认 1]: "
+        read -r mem_g_input
+        print_input "带宽 (Mbps) [默认 1000]: "
+        read -r bw_mbps_input
+        print_input "往返延迟 RTT (ms) [默认 150]: "
+        read -r rtt_ms_input
+    fi
+    
+    local MEM_G=${mem_g_input:-1}
+    local BW_Mbps=${bw_mbps_input:-1000}
+    local RTT_ms=${rtt_ms_input:-150}
+    
+    # 校验输入
+    if ! [[ "$MEM_G" =~ ^[0-9]+([.][0-9]+)?$ ]]; then MEM_G=1; fi
+    if ! [[ "$BW_Mbps" =~ ^[0-9]+$ ]]; then BW_Mbps=1000; fi
+    if ! [[ "$RTT_ms" =~ ^[0-9]+([.][0-9]+)?$ ]]; then RTT_ms=150; fi
+    
+    local SYSCTL_TARGET="/etc/sysctl.d/999-net-bbr-fq.conf"
+    local KEY_REGEX='^(net\.core\.default_qdisc|net\.core\.rmem_max|net\.core\.wmem_max|net\.core\.rmem_default|net\.core\.wmem_default|net\.ipv4\.tcp_rmem|net\.ipv4\.tcp_wmem|net\.ipv4\.tcp_congestion_control)[[:space:]]*='
+    
+    # 计算 BDP 和桶化最大值
+    local BDP_BYTES=$(awk -v bw="$BW_Mbps" -v rtt="$RTT_ms" 'BEGIN{ printf "%.0f", bw*125*rtt }')
+    local MEM_BYTES=$(awk -v g="$MEM_G" 'BEGIN{ printf "%.0f", g*1024*1024*1024 }')
+    local TWO_BDP=$(( BDP_BYTES*2 ))
+    local RAM3_BYTES=$(awk -v m="$MEM_BYTES" 'BEGIN{ printf "%.0f", m*0.03 }')
+    local CAP64=$(( 64*1024*1024 ))
+    local MAX_NUM_BYTES=$(awk -v a="$TWO_BDP" -v b="$RAM3_BYTES" -v c="$CAP64" 'BEGIN{ m=a; if(b<m)m=b; if(c<m)m=c; printf "%.0f", m }')
+    
+    bucket_le_mb() {
+        local mb="${1:-0}"
+        if   [ "$mb" -ge 64 ]; then echo 64
+        elif [ "$mb" -ge 32 ]; then echo 32
+        elif [ "$mb" -ge 16 ]; then echo 16
+        elif [ "$mb" -ge 8 ]; then echo 8
+        elif [ "$mb" -ge 4 ]; then echo 4
+        else echo 4
+        fi
+    }
+    local MAX_MB_NUM=$(( MAX_NUM_BYTES/1024/1024 ))
+    local MAX_MB=$(bucket_le_mb "$MAX_MB_NUM")
+    local MAX_BYTES=$(( MAX_MB*1024*1024 ))
+    
+    local DEF_R=131072 DEF_W=131072
+    if [ "$MAX_MB" -ge 32 ]; then
+        DEF_R=262144; DEF_W=524288
+    elif [ "$MAX_MB" -ge 8 ]; then
+        DEF_R=131072; DEF_W=262144
+    else
+        DEF_R=131072; DEF_W=131072
+    fi
+    
+    local TCP_RMEM_MIN=4096 TCP_RMEM_DEF=87380 TCP_RMEM_MAX=$MAX_BYTES
+    local TCP_WMEM_MIN=4096 TCP_WMEM_DEF=65536 TCP_WMEM_MAX=$MAX_BYTES
+    
+    # 清理冲突
+    print_info "清理旧配置冲突..."
+    local f="/etc/sysctl.conf"
+    if [ -f "$f" ] && grep -Eq "$KEY_REGEX" "$f"; then
+        print_info "注释 /etc/sysctl.conf 中的冲突键"
+        awk -v re="$KEY_REGEX" '
+            $0 ~ re && $0 !~ /^[[:space:]]*#/ { print "# " $0; next }
+            { print $0 }
+        ' "$f" > "${f}.tmp.$$"
+        install -m 0644 "${f}.tmp.$$" "$f"
+        rm -f "${f}.tmp.$$"
+    fi
+    
+    # 删除 /etc/sysctl.d 下含冲突键的旧文件
+    if [ -d "/etc/sysctl.d" ]; then
+        shopt -s nullglob
+        for cf in /etc/sysctl.d/*.conf; do
+            [ "$(readlink -f "$cf")" = "$(readlink -f "$SYSCTL_TARGET")" ] && continue
+            if grep -Eq "$KEY_REGEX" "$cf"; then
+                rm -f -- "$cf"
+                print_info "已删除冲突文件：$cf"
+            fi
+        done
+        shopt -u nullglob
+    fi
+    
+    # 只读提示其他目录
+    for dir in /usr/local/lib/sysctl.d /usr/lib/sysctl.d /lib/sysctl.d /run/sysctl.d; do
+        if [ -d "$dir" ] && grep -RIlEq "$KEY_REGEX" "$dir" 2>/dev/null; then
+            print_warning "其他目录存在冲突（仅提示）: $dir"
+            grep -RhnE "$KEY_REGEX" "$dir" 2>/dev/null || true
+        fi
+    done
+    
+    # 启用 BBR 模块
+    if command -v modprobe >/dev/null 2>&1; then
+        modprobe tcp_bbr 2>/dev/null || true
+    fi
+    
+    # 写入新配置
+    local tmpf="$(mktemp)"
+    cat >"$tmpf" <<EOF
+# Auto-generated by secure_tunnel (TCP tuning)
+# Inputs: MEM_G=${MEM_G}GiB, BW=${BW_Mbps}Mbps, RTT=${RTT_ms}ms
+# BDP: ${BDP_BYTES} bytes (~$(awk -v b="$BDP_BYTES" 'BEGIN{ printf "%.2f", b/1024/1024 }') MB)
+# Caps: min(2*BDP, 3%RAM, 64MB) -> Bucket ${MAX_MB} MB
+
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+net.core.rmem_default = ${DEF_R}
+net.core.wmem_default = ${DEF_W}
+net.core.rmem_max = ${MAX_BYTES}
+net.core.wmem_max = ${MAX_BYTES}
+
+net.ipv4.tcp_rmem = ${TCP_RMEM_MIN} ${TCP_RMEM_DEF} ${TCP_RMEM_MAX}
+net.ipv4.tcp_wmem = ${TCP_WMEM_MIN} ${TCP_WMEM_DEF} ${TCP_WMEM_MAX}
+
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_fastopen = 3
+EOF
+    install -m 0644 "$tmpf" "$SYSCTL_TARGET"
+    rm -f "$tmpf"
+    
+    sysctl --system >/dev/null
+    
+    # 尝试设置 qdisc
+    local iface=$(ip -o -4 route show to default 2>/dev/null | awk '{print $5}' | head -1)
+    if command -v tc >/dev/null 2>&1 && [ -n "${iface:-}" ]; then
+        tc qdisc replace dev "$iface" root fq 2>/dev/null || true
+    fi
+    
+    echo ""
+    print_success "TCP 优化已完成"
+    echo "==== 当前生效值 ===="
+    echo "内存: ${MEM_G} GiB, 带宽: ${BW_Mbps} Mbps, RTT: ${RTT_ms} ms"
+    echo "桶值: ${MAX_MB} MB"
+    sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null && echo -n " 拥塞控制: " && sysctl -n net.ipv4.tcp_congestion_control
+    sysctl -n net.core.default_qdisc 2>/dev/null && echo -n " 默认队列: " && sysctl -n net.core.default_qdisc
+    sysctl -n net.core.rmem_max 2>/dev/null && echo -n " rmem_max: " && sysctl -n net.core.rmem_max
+    sysctl -n net.core.wmem_max 2>/dev/null && echo -n " wmem_max: " && sysctl -n net.core.wmem_max
+    sysctl -n net.ipv4.tcp_rmem 2>/dev/null && echo -n " tcp_rmem: " && sysctl -n net.ipv4.tcp_rmem
+    sysctl -n net.ipv4.tcp_wmem 2>/dev/null && echo -n " tcp_wmem: " && sysctl -n net.ipv4.tcp_wmem
+    if [ -n "${iface:-}" ]; then
+        echo "接口 ${iface} 的 qdisc:"
+        tc qdisc show dev "$iface" 2>/dev/null || echo "  无法获取"
+    fi
+    echo "=================="
+}
+
+# ----------------------------
 # 显示连接信息
 # ----------------------------
 show_connection_info() {
@@ -640,7 +810,6 @@ show_connection_info() {
         print_success "🆔 ShortId: $reality_short_id"
         print_success "🌐 ServerName: ${domain}, www.microsoft.com (SNI 伪装)"
         echo ""
-        # Reality 链接格式
         local reality_link="vless://${reality_uuid}@${domain}:${REALITY_PORT}?encryption=none&security=reality&type=tcp&flow=xtls-rprx-vision&pbk=${reality_public_key}&sid=${reality_short_id}&sni=${domain}&fp=chrome#VLESS-Reality"
         echo "📋 VLESS-Reality 链接:"
         echo "$reality_link"
@@ -681,18 +850,7 @@ show_connection_info() {
 }
 
 # ----------------------------
-# TCP 网络优化 (BBR+fq) - 与原脚本相同，此处略写完整函数
-# ----------------------------
-apply_tcp_tuning() {
-    # 与原脚本相同，因为篇幅此处仅保留调用，实际使用时复制完整的 apply_tcp_tuning 函数
-    # 为了保持脚本可运行，此处放置一个简化版本，实际完整内容已在最终脚本中提供
-    print_info "TCP 网络优化 (BBR+fq) - 详细内容请查看完整脚本"
-    # 实际会包含所有优化逻辑，请参考之前的完整实现
-}
-# 注意：由于篇幅限制，apply_tcp_tuning 函数在此处省略，但在最终提供的脚本中会完整包含。
-
-# ----------------------------
-# 修改配置（含 Reality 修改）
+# 修改配置（含 WS 和 Reality）
 # ----------------------------
 modify_vless_config() {
     print_info "修改 VLESS 配置"
@@ -704,7 +862,7 @@ modify_vless_config() {
     echo ""
     print_input "请选择要修改的内容:"
     echo "  1) 修改 WebSocket 配置 (UUID/路径)"
-    echo "  2) 修改 Reality 配置 (UUID/密钥对/端口)"
+    echo "  2) 修改 Reality 配置 (UUID/密钥对)"
     echo "  3) 同时修改 WebSocket 和 Reality"
     echo "  0) 返回"
     read -r modify_choice
@@ -754,9 +912,10 @@ modify_ws_config() {
         new_path="/$new_uuid"
     fi
     
-    # 更新配置文件
+    # 更新配置文件中的 UUID
     sed -i "s/^WS_UUID=.*/WS_UUID=$new_uuid/" "$CONFIG_DIR/tunnel.conf"
-    # 重新生成 JSON (需要同时保留 Reality 部分)
+    
+    # 重新生成完整配置（保留 Reality 部分）
     local reality_uuid=$(grep "^REALITY_UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     local reality_private_key=$(grep "^REALITY_PRIVATE_KEY=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     local reality_short_id=$(grep "^REALITY_SHORT_ID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
@@ -788,10 +947,11 @@ modify_reality_config() {
     read -r regen_key
     local new_private_key=""
     local new_short_id=""
+    local new_public_key=""
     if [[ "$regen_key" == "y" || "$regen_key" == "Y" ]]; then
         local keypair=$(generate_reality_keypair)
         new_private_key=$(echo "$keypair" | cut -d'|' -f1)
-        local new_public_key=$(echo "$keypair" | cut -d'|' -f2)
+        new_public_key=$(echo "$keypair" | cut -d'|' -f2)
         new_short_id=$(openssl rand -hex 8)
         sed -i "s/^REALITY_PRIVATE_KEY=.*/REALITY_PRIVATE_KEY=$new_private_key/" "$CONFIG_DIR/tunnel.conf"
         sed -i "s/^REALITY_PUBLIC_KEY=.*/REALITY_PUBLIC_KEY=$new_public_key/" "$CONFIG_DIR/tunnel.conf"
@@ -803,7 +963,7 @@ modify_reality_config() {
     # 更新 UUID
     sed -i "s/^REALITY_UUID=.*/REALITY_UUID=$new_uuid/" "$CONFIG_DIR/tunnel.conf"
     
-    # 重新生成 Xray JSON
+    # 重新生成完整配置
     local ws_uuid=$(grep "^WS_UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     create_xray_config "$ws_uuid" "$new_uuid" "$new_private_key" "$new_short_id"
     
