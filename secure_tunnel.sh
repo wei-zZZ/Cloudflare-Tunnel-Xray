@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
 # Cloudflare Tunnel + Xray 安装脚本
-# 版本: 6.5 - 精简版（移除TCP优化）
+# 版本: 6.6 - 增加 VLESS+RAW+Reality（无隧道）
 # ============================================
 
 set -e
@@ -37,6 +37,16 @@ USER_DOMAIN=""
 TUNNEL_NAME="secure-tunnel"
 SILENT_MODE=false
 PROTOCOL="vless"          # 固定为 VLESS
+INSTALL_MODE="tunnel"     # tunnel | reality
+
+# Reality 相关默认值
+REALITY_PORT=443
+REALITY_DEST="www.microsoft.com:443"
+REALITY_SNI="www.microsoft.com"
+REALITY_SHORT_ID=""
+REALITY_PRIVATE_KEY=""
+REALITY_PUBLIC_KEY=""
+SERVER_IP=""
 
 # ----------------------------
 # 显示标题
@@ -46,7 +56,7 @@ show_title() {
     echo ""
     echo "╔══════════════════════════════════════════════╗"
     echo "║    Cloudflare Tunnel + Xray 管理脚本        ║"
-    echo "║        版本: 6.5 - 精简版                   ║"
+    echo "║   版本: 6.6 - 支持 VLESS+Reality 无隧道     ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
 }
@@ -80,7 +90,7 @@ EOF
 }
 
 # ----------------------------
-# 收集用户信息
+# 收集用户信息（隧道模式）
 # ----------------------------
 collect_user_info() {
     echo ""
@@ -117,6 +127,97 @@ collect_user_info() {
     echo "  域名: $USER_DOMAIN"
     echo "  隧道名称: $TUNNEL_NAME"
     echo "  协议: VLESS (仅支持)"
+    echo ""
+}
+
+# ----------------------------
+# 收集 Reality 配置信息
+# ----------------------------
+collect_reality_info() {
+    echo ""
+    print_info "═══════════════════════════════════════════════"
+    print_info "     配置 VLESS + RAW + Reality（无隧道）"
+    print_info "═══════════════════════════════════════════════"
+    echo ""
+    
+    # 获取公网 IP
+    print_info "正在检测服务器公网 IP..."
+    SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || curl -s --connect-timeout 5 https://ifconfig.me 2>/dev/null || echo "")
+    if [[ -z "$SERVER_IP" ]]; then
+        print_warning "无法自动获取公网 IP"
+        print_input "请手动输入服务器公网 IP 或域名:"
+        read -r SERVER_IP
+        while [[ -z "$SERVER_IP" ]]; do
+            print_error "不能为空！"
+            print_input "请输入服务器公网 IP 或域名:"
+            read -r SERVER_IP
+        done
+    else
+        print_success "检测到公网 IP: $SERVER_IP"
+        print_input "是否使用此 IP？直接回车确认，或输入域名/其他IP:"
+        read -r ip_input
+        if [[ -n "$ip_input" ]]; then
+            SERVER_IP="$ip_input"
+        fi
+    fi
+    
+    # 监听端口
+    print_input "请输入监听端口 [默认: 443]:"
+    read -r port_input
+    if [[ -n "$port_input" ]]; then
+        if [[ "$port_input" =~ ^[0-9]+$ ]] && [ "$port_input" -ge 1 ] && [ "$port_input" -le 65535 ]; then
+            REALITY_PORT="$port_input"
+        else
+            print_warning "端口无效，使用默认 443"
+            REALITY_PORT=443
+        fi
+    else
+        REALITY_PORT=443
+    fi
+    
+    # 伪装目标站点
+    echo ""
+    print_info "常用伪装目标（dest）推荐："
+    echo "  1) www.microsoft.com:443  (默认)"
+    echo "  2) www.cloudflare.com:443"
+    echo "  3) www.apple.com:443"
+    echo "  4) www.amazon.com:443"
+    echo "  5) 自定义"
+    print_input "请选择伪装目标 [1-5, 默认1]:"
+    read -r dest_choice
+    case "${dest_choice:-1}" in
+        1) REALITY_DEST="www.microsoft.com:443"; REALITY_SNI="www.microsoft.com" ;;
+        2) REALITY_DEST="www.cloudflare.com:443"; REALITY_SNI="www.cloudflare.com" ;;
+        3) REALITY_DEST="www.apple.com:443"; REALITY_SNI="www.apple.com" ;;
+        4) REALITY_DEST="www.amazon.com:443"; REALITY_SNI="www.amazon.com" ;;
+        5)
+            print_input "请输入伪装目标 (格式: 域名:端口，如 www.example.com:443):"
+            read -r custom_dest
+            if [[ -n "$custom_dest" ]]; then
+                REALITY_DEST="$custom_dest"
+                REALITY_SNI=$(echo "$custom_dest" | cut -d: -f1)
+            else
+                REALITY_DEST="www.microsoft.com:443"
+                REALITY_SNI="www.microsoft.com"
+            fi
+            ;;
+        *) REALITY_DEST="www.microsoft.com:443"; REALITY_SNI="www.microsoft.com" ;;
+    esac
+    
+    # 可选自定义 SNI
+    print_input "serverName (SNI) [默认: $REALITY_SNI，直接回车使用默认]:"
+    read -r sni_input
+    if [[ -n "$sni_input" ]]; then
+        REALITY_SNI="$sni_input"
+    fi
+    
+    echo ""
+    print_success "Reality 配置预览:"
+    echo "  服务器地址: $SERVER_IP"
+    echo "  监听端口: $REALITY_PORT"
+    echo "  伪装目标 (dest): $REALITY_DEST"
+    echo "  serverName (SNI): $REALITY_SNI"
+    echo "  协议: VLESS + TCP(RAW) + Reality + Vision"
     echo ""
 }
 
@@ -207,9 +308,10 @@ unzip_direct_install() {
 }
 
 # ----------------------------
-# 安装组件
+# 安装组件（可只装 Xray）
 # ----------------------------
 install_components() {
+    local only_xray=${1:-false}
     print_info "安装必要组件..."
     
     local arch
@@ -251,18 +353,22 @@ install_components() {
         exit 1
     fi
     
-    print_info "下载 cloudflared..."
-    if curl -L -o /tmp/cloudflared "$cf_url"; then
-        mv /tmp/cloudflared "$BIN_DIR/cloudflared"
-        chmod +x "$BIN_DIR/cloudflared"
-        print_success "cloudflared 安装成功"
+    if [[ "$only_xray" != "true" ]]; then
+        print_info "下载 cloudflared..."
+        if curl -L -o /tmp/cloudflared "$cf_url"; then
+            mv /tmp/cloudflared "$BIN_DIR/cloudflared"
+            chmod +x "$BIN_DIR/cloudflared"
+            print_success "cloudflared 安装成功"
+        else
+            print_error "cloudflared 下载失败"
+            exit 1
+        fi
     else
-        print_error "cloudflared 下载失败"
-        exit 1
+        print_info "Reality 模式：跳过 cloudflared 安装"
     fi
     
     rm -rf /tmp/xray* /tmp/cloudflare* 2>/dev/null
-    print_success "所有组件安装完成"
+    print_success "组件安装完成"
 }
 
 # ----------------------------
@@ -371,6 +477,7 @@ setup_tunnel() {
     
     mkdir -p "$CONFIG_DIR"
     cat > "$CONFIG_DIR/tunnel.conf" << EOF
+INSTALL_MODE=tunnel
 TUNNEL_ID=$tunnel_id
 TUNNEL_NAME=$TUNNEL_NAME
 DOMAIN=$USER_DOMAIN
@@ -384,7 +491,7 @@ EOF
 }
 
 # ----------------------------
-# 配置 Xray (VLESS)
+# 配置 Xray (VLESS WS 隧道模式)
 # ----------------------------
 configure_xray() {
     print_info "配置 Xray..."
@@ -427,7 +534,134 @@ EOF
 }
 
 # ----------------------------
-# 配置系统服务
+# 生成 Reality 密钥并配置
+# ----------------------------
+configure_reality() {
+    print_info "生成 Reality 密钥与配置..."
+    
+    mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
+    
+    # 生成 x25519 密钥对
+    local key_output
+    key_output=$("$BIN_DIR/xray" x25519 2>/dev/null)
+    if [[ -z "$key_output" ]]; then
+        print_error "无法生成 x25519 密钥，请确认 Xray 已正确安装"
+        exit 1
+    fi
+    
+    REALITY_PRIVATE_KEY=$(echo "$key_output" | grep -i "Private" | awk '{print $NF}')
+    REALITY_PUBLIC_KEY=$(echo "$key_output" | grep -i "Public" | awk '{print $NF}')
+    
+    if [[ -z "$REALITY_PRIVATE_KEY" || -z "$REALITY_PUBLIC_KEY" ]]; then
+        # 兼容不同版本输出格式
+        REALITY_PRIVATE_KEY=$(echo "$key_output" | sed -n '1p' | awk '{print $NF}')
+        REALITY_PUBLIC_KEY=$(echo "$key_output" | sed -n '2p' | awk '{print $NF}')
+    fi
+    
+    if [[ -z "$REALITY_PRIVATE_KEY" || -z "$REALITY_PUBLIC_KEY" ]]; then
+        print_error "解析 Reality 密钥失败"
+        echo "$key_output"
+        exit 1
+    fi
+    
+    print_success "PrivateKey: $REALITY_PRIVATE_KEY"
+    print_success "PublicKey:  $REALITY_PUBLIC_KEY"
+    
+    # 生成 shortId（8~16 位十六进制，这里用 8 位）
+    REALITY_SHORT_ID=$(openssl rand -hex 4 2>/dev/null || cat /proc/sys/kernel/random/uuid | tr -d '-' | cut -c1-8)
+    
+    local vless_uuid=$(cat /proc/sys/kernel/random/uuid)
+    
+    # 写入配置文件
+    cat > "$CONFIG_DIR/tunnel.conf" << EOF
+INSTALL_MODE=reality
+PROTOCOL=vless
+SERVER_IP=$SERVER_IP
+PORT=$REALITY_PORT
+VLESS_UUID=$vless_uuid
+REALITY_DEST=$REALITY_DEST
+REALITY_SNI=$REALITY_SNI
+REALITY_PRIVATE_KEY=$REALITY_PRIVATE_KEY
+REALITY_PUBLIC_KEY=$REALITY_PUBLIC_KEY
+REALITY_SHORT_ID=$REALITY_SHORT_ID
+CREATED_DATE=$(date +"%Y-%m-%d")
+EOF
+    
+    create_reality_config "$vless_uuid" "$REALITY_PORT" "$REALITY_PRIVATE_KEY" "$REALITY_DEST" "$REALITY_SNI" "$REALITY_SHORT_ID"
+    
+    print_success "Reality 配置完成"
+}
+
+create_reality_config() {
+    local uuid=$1
+    local port=$2
+    local private_key=$3
+    local dest=$4
+    local sni=$5
+    local short_id=$6
+    
+    cat > "$CONFIG_DIR/xray.json" << EOF
+{
+    "log": {
+        "loglevel": "warning"
+    },
+    "inbounds": [
+        {
+            "listen": "0.0.0.0",
+            "port": $port,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$uuid",
+                        "flow": "xtls-rprx-vision"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                    "show": false,
+                    "dest": "$dest",
+                    "xver": 0,
+                    "serverNames": [
+                        "$sni"
+                    ],
+                    "privateKey": "$private_key",
+                    "shortIds": [
+                        "",
+                        "$short_id"
+                    ]
+                }
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": [
+                    "http",
+                    "tls",
+                    "quic"
+                ]
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "tag": "direct"
+        },
+        {
+            "protocol": "blackhole",
+            "tag": "block"
+        }
+    ]
+}
+EOF
+}
+
+# ----------------------------
+# 配置系统服务（隧道模式）
 # ----------------------------
 configure_services() {
     print_info "配置系统服务..."
@@ -436,7 +670,7 @@ configure_services() {
         useradd -r -s /usr/sbin/nologin "$SERVICE_USER"
     fi
     
-    chown -R "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
+    chown -R "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
     
     local tunnel_id=$(grep "^TUNNEL_ID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
     local json_file=$(grep "^CREDENTIALS_FILE=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
@@ -506,7 +740,51 @@ EOF
 }
 
 # ----------------------------
-# 启动服务
+# 配置 Reality 系统服务（仅 Xray）
+# ----------------------------
+configure_reality_service() {
+    print_info "配置 Reality 系统服务..."
+    
+    if ! id -u "$SERVICE_USER" &> /dev/null; then
+        useradd -r -s /usr/sbin/nologin "$SERVICE_USER" 2>/dev/null || true
+    fi
+    
+    # Reality 监听 443 等特权端口，建议用 root 运行，或授权 capabilities
+    # 为兼容性与简单性，使用 root 运行 Xray（与多数 Reality 脚本一致）
+    chown -R root:root "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
+    
+    cat > /etc/systemd/system/secure-tunnel-xray.service << EOF
+[Unit]
+Description=Secure Tunnel Xray Reality Service
+After=network.target
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=$BIN_DIR/xray run -config $CONFIG_DIR/xray.json
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+StandardOutput=append:$LOG_DIR/xray.log
+StandardError=append:$LOG_DIR/xray-error.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    # 确保不启动 argo
+    systemctl disable secure-tunnel-argo.service 2>/dev/null || true
+    systemctl stop secure-tunnel-argo.service 2>/dev/null || true
+    
+    systemctl daemon-reload
+    print_success "Reality 服务配置完成"
+}
+
+# ----------------------------
+# 启动服务（隧道）
 # ----------------------------
 start_services() {
     print_info "启动服务..."
@@ -556,7 +834,40 @@ start_services() {
 }
 
 # ----------------------------
-# 修改 VLESS 配置（含端口修改）
+# 启动 Reality 服务
+# ----------------------------
+start_reality_service() {
+    print_info "启动 Reality Xray 服务..."
+    
+    systemctl stop secure-tunnel-argo.service 2>/dev/null || true
+    systemctl disable secure-tunnel-argo.service 2>/dev/null || true
+    systemctl stop secure-tunnel-xray.service 2>/dev/null || true
+    sleep 2
+    
+    # 检查端口占用
+    if command -v ss &> /dev/null; then
+        if ss -tlnp | grep -q ":${REALITY_PORT} "; then
+            print_warning "端口 $REALITY_PORT 可能已被占用，请确认"
+            ss -tlnp | grep ":${REALITY_PORT} " || true
+        fi
+    fi
+    
+    systemctl enable secure-tunnel-xray.service > /dev/null 2>&1
+    systemctl start secure-tunnel-xray.service
+    sleep 3
+    
+    if systemctl is-active --quiet secure-tunnel-xray.service; then
+        print_success "✅ Xray Reality 服务启动成功"
+        return 0
+    else
+        print_error "❌ Xray Reality 服务启动失败"
+        journalctl -u secure-tunnel-xray.service -n 30 --no-pager
+        return 1
+    fi
+}
+
+# ----------------------------
+# 修改 VLESS 配置（含端口修改）- 隧道模式
 # ----------------------------
 modify_vless_config() {
     print_info "修改 VLESS 配置"
@@ -564,6 +875,14 @@ modify_vless_config() {
     if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
         print_error "未找到配置文件，请先安装"
         return 1
+    fi
+    
+    local mode=$(grep "^INSTALL_MODE=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
+    mode=${mode:-tunnel}
+    
+    if [[ "$mode" == "reality" ]]; then
+        modify_reality_config
+        return $?
     fi
     
     echo ""
@@ -751,7 +1070,145 @@ EOF
 }
 
 # ----------------------------
-# 显示连接信息
+# 修改 Reality 配置
+# ----------------------------
+modify_reality_config() {
+    print_info "修改 Reality 配置"
+    
+    if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
+        print_error "未找到配置文件"
+        return 1
+    fi
+    
+    echo ""
+    print_input "请选择要修改的内容:"
+    echo "  1) 重新生成 UUID"
+    echo "  2) 重新生成 Reality 密钥对 + ShortId"
+    echo "  3) 修改监听端口"
+    echo "  4) 修改伪装目标 (dest/SNI)"
+    echo "  5) 全部重新生成（UUID + 密钥 + ShortId）"
+    echo "  0) 返回"
+    echo ""
+    read -r choice
+    
+    local current_uuid=$(grep "^VLESS_UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local current_port=$(grep "^PORT=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local current_dest=$(grep "^REALITY_DEST=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local current_sni=$(grep "^REALITY_SNI=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local current_priv=$(grep "^REALITY_PRIVATE_KEY=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local current_pub=$(grep "^REALITY_PUBLIC_KEY=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local current_sid=$(grep "^REALITY_SHORT_ID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local server_ip=$(grep "^SERVER_IP=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    
+    local new_uuid="$current_uuid"
+    local new_port="$current_port"
+    local new_dest="$current_dest"
+    local new_sni="$current_sni"
+    local new_priv="$current_priv"
+    local new_pub="$current_pub"
+    local new_sid="$current_sid"
+    
+    case "$choice" in
+        1)
+            new_uuid=$(cat /proc/sys/kernel/random/uuid)
+            print_info "新 UUID: $new_uuid"
+            ;;
+        2)
+            local key_output
+            key_output=$("$BIN_DIR/xray" x25519 2>/dev/null)
+            new_priv=$(echo "$key_output" | grep -i "Private" | awk '{print $NF}')
+            new_pub=$(echo "$key_output" | grep -i "Public" | awk '{print $NF}')
+            if [[ -z "$new_priv" ]]; then
+                new_priv=$(echo "$key_output" | sed -n '1p' | awk '{print $NF}')
+                new_pub=$(echo "$key_output" | sed -n '2p' | awk '{print $NF}')
+            fi
+            new_sid=$(openssl rand -hex 4 2>/dev/null || cat /proc/sys/kernel/random/uuid | tr -d '-' | cut -c1-8)
+            print_info "新 PrivateKey: $new_priv"
+            print_info "新 PublicKey:  $new_pub"
+            print_info "新 ShortId:    $new_sid"
+            ;;
+        3)
+            print_input "请输入新端口 (当前: $current_port):"
+            read -r port_input
+            if [[ "$port_input" =~ ^[0-9]+$ ]] && [ "$port_input" -ge 1 ] && [ "$port_input" -le 65535 ]; then
+                new_port="$port_input"
+            else
+                print_error "端口无效"
+                return 1
+            fi
+            ;;
+        4)
+            print_input "请输入新伪装目标 (格式 域名:端口，当前: $current_dest):"
+            read -r dest_input
+            if [[ -n "$dest_input" ]]; then
+                new_dest="$dest_input"
+                new_sni=$(echo "$dest_input" | cut -d: -f1)
+            fi
+            print_input "请输入新 SNI (当前: $current_sni，直接回车使用目标域名):"
+            read -r sni_input
+            if [[ -n "$sni_input" ]]; then
+                new_sni="$sni_input"
+            fi
+            ;;
+        5)
+            new_uuid=$(cat /proc/sys/kernel/random/uuid)
+            local key_output
+            key_output=$("$BIN_DIR/xray" x25519 2>/dev/null)
+            new_priv=$(echo "$key_output" | grep -i "Private" | awk '{print $NF}')
+            new_pub=$(echo "$key_output" | grep -i "Public" | awk '{print $NF}')
+            if [[ -z "$new_priv" ]]; then
+                new_priv=$(echo "$key_output" | sed -n '1p' | awk '{print $NF}')
+                new_pub=$(echo "$key_output" | sed -n '2p' | awk '{print $NF}')
+            fi
+            new_sid=$(openssl rand -hex 4 2>/dev/null || cat /proc/sys/kernel/random/uuid | tr -d '-' | cut -c1-8)
+            print_info "全部重新生成完成"
+            ;;
+        0)
+            return 0
+            ;;
+        *)
+            print_error "无效选项"
+            return 1
+            ;;
+    esac
+    
+    # 写回配置
+    cat > "$CONFIG_DIR/tunnel.conf" << EOF
+INSTALL_MODE=reality
+PROTOCOL=vless
+SERVER_IP=$server_ip
+PORT=$new_port
+VLESS_UUID=$new_uuid
+REALITY_DEST=$new_dest
+REALITY_SNI=$new_sni
+REALITY_PRIVATE_KEY=$new_priv
+REALITY_PUBLIC_KEY=$new_pub
+REALITY_SHORT_ID=$new_sid
+CREATED_DATE=$(date +"%Y-%m-%d")
+EOF
+    
+    create_reality_config "$new_uuid" "$new_port" "$new_priv" "$new_dest" "$new_sni" "$new_sid"
+    
+    print_info "重启 Xray 服务..."
+    systemctl restart secure-tunnel-xray.service
+    sleep 2
+    
+    if systemctl is-active --quiet secure-tunnel-xray.service; then
+        print_success "✅ 服务已重启"
+    else
+        print_error "❌ 服务重启失败"
+        return 1
+    fi
+    
+    local vless_link="vless://${new_uuid}@${server_ip}:${new_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${new_sni}&fp=chrome&pbk=${new_pub}&sid=${new_sid}&type=tcp&headerType=none#VLESS-Reality"
+    echo ""
+    print_success "配置已更新！新的 VLESS+Reality 链接:"
+    echo "$vless_link"
+    echo ""
+}
+
+# ----------------------------
+# 显示连接信息（隧道）
 # ----------------------------
 show_connection_info() {
     print_info "═══════════════════════════════════════════════"
@@ -827,10 +1284,82 @@ show_connection_info() {
 }
 
 # ----------------------------
-# 主安装流程
+# 显示 Reality 连接信息
+# ----------------------------
+show_reality_connection_info() {
+    print_info "═══════════════════════════════════════════════"
+    print_info "     VLESS + RAW + Reality 安装完成！"
+    print_info "═══════════════════════════════════════════════"
+    echo ""
+    
+    if [[ ! -f "$CONFIG_DIR/tunnel.conf" ]]; then
+        print_error "未找到配置文件"
+        return
+    fi
+    
+    local server_ip=$(grep "^SERVER_IP=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local port=$(grep "^PORT=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local uuid=$(grep "^VLESS_UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local sni=$(grep "^REALITY_SNI=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local pub=$(grep "^REALITY_PUBLIC_KEY=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local sid=$(grep "^REALITY_SHORT_ID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    local dest=$(grep "^REALITY_DEST=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+    
+    print_success "🔗 服务器地址: $server_ip"
+    print_success "🚪 端口: $port"
+    print_success "📡 协议: VLESS + TCP(RAW) + Reality + Vision"
+    print_success "🔑 UUID: $uuid"
+    print_success "🏷️  SNI / serverName: $sni"
+    print_success "🎯 伪装目标 (dest): $dest"
+    print_success "🔐 PublicKey (pbk): $pub"
+    print_success "🆔 ShortId (sid): $sid"
+    print_success "🌊 Flow: xtls-rprx-vision"
+    echo ""
+    
+    local vless_link="vless://${uuid}@${server_ip}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${sid}&type=tcp&headerType=none#VLESS-Reality"
+    
+    echo "📋 VLESS + Reality 链接（可直接导入客户端）:"
+    echo ""
+    echo "$vless_link"
+    echo ""
+    
+    print_info "🧪 服务状态:"
+    if systemctl is-active --quiet secure-tunnel-xray.service; then
+        print_success "✅ Xray Reality 服务: 运行中"
+    else
+        print_error "❌ Xray Reality 服务: 未运行"
+    fi
+    
+    echo ""
+    print_info "📋 客户端参数参考:"
+    echo "  地址: $server_ip"
+    echo "  端口: $port"
+    echo "  UUID: $uuid"
+    echo "  Flow: xtls-rprx-vision"
+    echo "  加密: none"
+    echo "  传输: tcp (raw)"
+    echo "  安全: reality"
+    echo "  SNI: $sni"
+    echo "  Fingerprint: chrome"
+    echo "  PublicKey: $pub"
+    echo "  ShortId: $sid"
+    echo ""
+    
+    print_info "🔧 管理命令:"
+    echo "  状态检查: sudo ./secure_tunnel.sh status"
+    echo "  查看配置: sudo ./secure_tunnel.sh config"
+    echo "  修改配置: sudo ./secure_tunnel.sh modify"
+    echo "  重启服务: systemctl restart secure-tunnel-xray.service"
+    echo "  查看日志: journalctl -u secure-tunnel-xray.service -f"
+    echo ""
+    print_warning "注意：请确保防火墙/安全组已放行端口 $port (TCP)"
+}
+
+# ----------------------------
+# 主安装流程（隧道）
 # ----------------------------
 main_install() {
-    print_info "开始安装流程..."
+    print_info "开始安装流程（Cloudflare Tunnel + VLESS）..."
     
     check_system
     install_components
@@ -863,6 +1392,30 @@ main_install() {
     
     echo ""
     print_success "🎉 安装完成！"
+    return 0
+}
+
+# ----------------------------
+# 主安装流程（Reality 无隧道）
+# ----------------------------
+main_install_reality() {
+    print_info "开始安装流程（VLESS + RAW + Reality，无隧道）..."
+    
+    check_system
+    install_components "true"   # 只装 Xray
+    collect_reality_info
+    configure_reality
+    configure_reality_service
+    
+    if ! start_reality_service; then
+        print_error "服务启动失败"
+        return 1
+    fi
+    
+    show_reality_connection_info
+    
+    echo ""
+    print_success "🎉 VLESS + Reality 安装完成！"
     return 0
 }
 
@@ -920,6 +1473,40 @@ show_config() {
         return 1
     fi
     
+    local mode=$(grep "^INSTALL_MODE=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
+    mode=${mode:-tunnel}
+    
+    if [[ "$mode" == "reality" ]]; then
+        local server_ip=$(grep "^SERVER_IP=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+        local port=$(grep "^PORT=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+        local uuid=$(grep "^VLESS_UUID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+        local sni=$(grep "^REALITY_SNI=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+        local pub=$(grep "^REALITY_PUBLIC_KEY=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+        local sid=$(grep "^REALITY_SHORT_ID=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+        local dest=$(grep "^REALITY_DEST=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+        local priv=$(grep "^REALITY_PRIVATE_KEY=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+        
+        echo ""
+        print_success "当前配置 (VLESS + Reality 无隧道):"
+        echo "  模式: Reality"
+        echo "  服务器地址: $server_ip"
+        echo "  端口: $port"
+        echo "  UUID: $uuid"
+        echo "  SNI: $sni"
+        echo "  dest: $dest"
+        echo "  PublicKey: $pub"
+        echo "  PrivateKey: $priv"
+        echo "  ShortId: $sid"
+        echo "  Flow: xtls-rprx-vision"
+        echo ""
+        
+        local vless_link="vless://${uuid}@${server_ip}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${sid}&type=tcp&headerType=none#VLESS-Reality"
+        print_info "📡 VLESS+Reality 链接:"
+        echo "$vless_link"
+        echo ""
+        return 0
+    fi
+    
     local domain=$(grep "^DOMAIN=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
     local vless_uuid=$(grep "^VLESS_UUID=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
     local port=$(grep "^PORT=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
@@ -937,7 +1524,7 @@ show_config() {
     ws_path=${ws_path:-"/$vless_uuid"}
     
     echo ""
-    print_success "当前配置:"
+    print_success "当前配置 (Cloudflare Tunnel):"
     echo "  域名: $domain"
     echo "  协议: VLESS"
     echo "  监听端口: $port (本地, 仅用于隧道回源)"
@@ -958,6 +1545,12 @@ show_status() {
     print_info "服务状态检查..."
     echo ""
     
+    local mode=""
+    if [[ -f "$CONFIG_DIR/tunnel.conf" ]]; then
+        mode=$(grep "^INSTALL_MODE=" "$CONFIG_DIR/tunnel.conf" 2>/dev/null | cut -d'=' -f2)
+    fi
+    mode=${mode:-tunnel}
+    
     if systemctl is-active --quiet secure-tunnel-xray.service; then
         print_success "Xray 服务: 运行中"
     else
@@ -965,13 +1558,21 @@ show_status() {
     fi
     echo ""
     
-    if systemctl is-active --quiet secure-tunnel-argo.service; then
-        print_success "Argo Tunnel 服务: 运行中"
-        echo ""
-        print_info "隧道信息:"
-        "$BIN_DIR/cloudflared" tunnel list 2>/dev/null || true
+    if [[ "$mode" == "reality" ]]; then
+        print_info "当前模式: VLESS + Reality（无隧道）"
+        if [[ -f "$CONFIG_DIR/tunnel.conf" ]]; then
+            local port=$(grep "^PORT=" "$CONFIG_DIR/tunnel.conf" | cut -d'=' -f2)
+            print_info "监听端口: $port"
+        fi
     else
-        print_error "Argo Tunnel 服务: 未运行"
+        if systemctl is-active --quiet secure-tunnel-argo.service; then
+            print_success "Argo Tunnel 服务: 运行中"
+            echo ""
+            print_info "隧道信息:"
+            "$BIN_DIR/cloudflared" tunnel list 2>/dev/null || true
+        else
+            print_error "Argo Tunnel 服务: 未运行"
+        fi
     fi
 }
 
@@ -983,15 +1584,16 @@ show_menu() {
     
     echo "请选择操作："
     echo ""
-    echo "  1) 安装 Secure Tunnel"
-    echo "  2) 卸载 Secure Tunnel"
-    echo "  3) 查看服务状态"
-    echo "  4) 查看配置信息"
-    echo "  5) 修改 VLESS 配置 (UUID/路径/端口)"
-    echo "  6) 退出"
+    echo "  1) 安装 Cloudflare Tunnel + VLESS"
+    echo "  2) 一键安装 VLESS + RAW + Reality（无隧道）"
+    echo "  3) 卸载 Secure Tunnel"
+    echo "  4) 查看服务状态"
+    echo "  5) 查看配置信息"
+    echo "  6) 修改配置 (UUID/路径/端口/Reality密钥)"
+    echo "  7) 退出"
     echo ""
     
-    print_input "请输入选项 (1-6): "
+    print_input "请输入选项 (1-7): "
     read -r choice
     
     case "$choice" in
@@ -1009,30 +1611,43 @@ show_menu() {
             fi
             ;;
         2)
+            SILENT_MODE=false
+            if main_install_reality; then
+                echo ""
+                print_input "按回车键返回菜单..."
+                read -r
+            else
+                echo ""
+                print_error "安装失败"
+                print_input "按回车键返回菜单..."
+                read -r
+            fi
+            ;;
+        3)
             uninstall_all
             echo ""
             print_input "按回车键返回菜单..."
             read -r
             ;;
-        3)
+        4)
             show_status
             echo ""
             print_input "按回车键返回菜单..."
             read -r
             ;;
-        4)
+        5)
             show_config
             echo ""
             print_input "按回车键返回菜单..."
             read -r
             ;;
-        5)
+        6)
             modify_vless_config
             echo ""
             print_input "按回车键返回菜单..."
             read -r
             ;;
-        6)
+        7)
             print_info "再见！"
             exit 0
             ;;
@@ -1054,6 +1669,11 @@ main() {
             SILENT_MODE=false
             show_title
             main_install
+            ;;
+        "install-reality"|"reality")
+            SILENT_MODE=false
+            show_title
+            main_install_reality
             ;;
         "uninstall")
             show_title
@@ -1082,13 +1702,15 @@ main() {
         *)
             show_title
             echo "使用方法:"
-            echo "  sudo ./secure_tunnel.sh menu          # 显示菜单"
-            echo "  sudo ./secure_tunnel.sh install       # 安装"
-            echo "  sudo ./secure_tunnel.sh uninstall     # 卸载"
-            echo "  sudo ./secure_tunnel.sh status        # 查看状态"
-            echo "  sudo ./secure_tunnel.sh config        # 查看配置"
-            echo "  sudo ./secure_tunnel.sh modify        # 修改VLESS配置"
-            echo "  sudo ./secure_tunnel.sh -y            # 静默安装"
+            echo "  sudo ./secure_tunnel.sh menu              # 显示菜单"
+            echo "  sudo ./secure_tunnel.sh install           # 安装 Cloudflare Tunnel + VLESS"
+            echo "  sudo ./secure_tunnel.sh install-reality   # 一键安装 VLESS+RAW+Reality（无隧道）"
+            echo "  sudo ./secure_tunnel.sh reality           # 同上"
+            echo "  sudo ./secure_tunnel.sh uninstall         # 卸载"
+            echo "  sudo ./secure_tunnel.sh status            # 查看状态"
+            echo "  sudo ./secure_tunnel.sh config            # 查看配置"
+            echo "  sudo ./secure_tunnel.sh modify            # 修改配置"
+            echo "  sudo ./secure_tunnel.sh -y                # 静默安装隧道"
             exit 1
             ;;
     esac
